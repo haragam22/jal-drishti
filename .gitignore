@@ -4,8 +4,10 @@ ml-engine/data/detection/backgrounds
 ml-engine/outputs/pipeline/multi_test
 ### Node ###
 ml-engine/venv
+backend/venv
 ml-engine/detection/yolo/weights/yolov8n.pt
 frontend/docs_helping
+*.pyc
 # Logs
 logs
 *.log
