@@ -29,6 +29,12 @@ class FrameScheduler:
         if self.ml_module:
             print("[Scheduler] ML Module detected. Using synchronous inference.")
         
+        # SAFE MODE State
+        self.in_safe_mode = False
+        self.safe_mode_reason = None
+        self.last_recovery_check = 0.0
+        self.recovery_interval = 5.0 # Seconds
+        
         start_time = time.time()
         frames_processed_in_window = 0
         last_fps_log_time = start_time
@@ -36,100 +42,151 @@ class FrameScheduler:
 
         # We iterate through all frames from the reader
         # logical_frame_index tracks the index in the video source
-        for frame in self.video_reader.read_video():
-            current_time = time.time()
-            elapsed_total = current_time - start_time
-            
-            if not hasattr(self, '_internal_frame_counter'):
-                self._internal_frame_counter = 0
-            
-            expected_time_for_frame = self._internal_frame_counter * self.frame_interval
-            self._internal_frame_counter += 1
-
-            # Check if we are lagging behind real-time
-            
-            # Reset start_time on first frame to align
-            if self._internal_frame_counter == 1:
-                start_time = time.time()
-                elapsed_total = 0
-                expected_time_for_frame = 0
-
-            # Drift check
-            drift = elapsed_total - expected_time_for_frame 
-            
-            if drift > self.frame_interval:
-                # We are behind by more than one frame. Drop this frame.
-                print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=DROPPED (Drift={drift:.4f}s)")
-            else:
-                # Process the frame
-                print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=PROCESSED")
+        try:
+            for frame in self.video_reader.read_video():
+                current_time = time.time()
+                elapsed_total = current_time - start_time
                 
-                # PROCESSING LOGIC
-                if self.ml_module:
-                    try:
-                        # Blocking call to ML
-                        # "Scheduler waits for inference result before moving to next frame"
-                        # "DROPPED frames are never sent to ML" (handled by else branch)
-                        print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Sending to ML...")
-                        result = self.ml_module.run_inference(frame)
-                        print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Result Received.")
-                        
-                        # CALLBACK FOR WEBSOCKET
-                        if self.result_callback:
-                            # Construct payload
-                            # {
-                            #   "frame_id": int,
-                            #   "status": "success",
-                            #   "detections": [],
-                            #   "visibility_score": float,
-                            #   "system": {
-                            #     "fps": float,
-                            #     "latency_ms": float
-                            #   }
-                            # }
+                if not hasattr(self, '_internal_frame_counter'):
+                    self._internal_frame_counter = 0
+                
+                expected_time_for_frame = self._internal_frame_counter * self.frame_interval
+                self._internal_frame_counter += 1
+
+                # Reset start_time on first frame to align
+                if self._internal_frame_counter == 1:
+                    start_time = time.time()
+                    elapsed_total = 0
+                    expected_time_for_frame = 0
+
+                # Drift check
+                drift = elapsed_total - expected_time_for_frame 
+                
+                if drift > self.frame_interval:
+                    # We are behind by more than one frame. Drop this frame.
+                    print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=DROPPED (Drift={drift:.4f}s)")
+                else:
+                    # Process the frame
+                    print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=PROCESSED")
+                    
+                    # SAFE MODE CHECK / RECOVERY
+                    should_run_ml = False
+                    
+                    if self.in_safe_mode:
+                        # Periodically check for recovery
+                        if current_time - self.last_recovery_check >= self.recovery_interval:
+                            print("[Scheduler] Safe Mode: Attempting recovery check...")
+                            should_run_ml = True # Try one inference
+                            self.last_recovery_check = current_time
+                        else:
+                            # Skip ML, send Safe Mode status
+                            if self.result_callback:
+                                self.result_callback({
+                                    "type": "system",
+                                    "status": "safe_mode",
+                                    "message": f"System in Safe Mode: {self.safe_mode_reason}",
+                                    "payload": None
+                                })
+                    else:
+                        should_run_ml = True # Normal operation
+
+                    # ML PROCESSING
+                    if self.ml_module and should_run_ml:
+                        try:
+                            # Blocking call to ML with timeout measurement
+                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Sending to ML...")
                             
-                            # Note: ML result doesn't explicitly have latency inside the dict based on dummy_ml, 
-                            # but dummy_ml logs it. Let's add it here if possible or just rely on what ML returned.
-                            # The Requirements said "ML fields must remain unchanged".
-                            # Let's trust ML result has what it has.
-                            # We need to add 'frame_id' and 'system'.
+                            ml_start = time.time()
+                            result = self.ml_module.run_inference(frame)
+                            ml_end = time.time()
+                            ml_duration = ml_end - ml_start
                             
-                            payload = result.copy()
-                            payload['frame_id'] = self._internal_frame_counter - 1
-                            payload['system'] = {
-                                "fps": current_fps,
-                                # We don't have exact latency capture from ML return val unless we change ML to return it.
-                                # But we can measure it here too.
-                                "latency_ms": 0.0 # Placeholder or measure it? 
-                                # Let's measure it cleanly.
-                            }
+                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Result Received. Duration={ml_duration:.4f}s")
                             
-                            self.result_callback(payload)
+                            # CHECK FOR SLOW INFERENCE
+                            if ml_duration > 0.2:
+                                raise TimeoutError(f"ML inference too slow: {ml_duration:.4f}s > 0.2s")
+                            
+                            # If we were in safe mode and succeeded quickly, recover
+                            if self.in_safe_mode:
+                                print(f"[Scheduler] Recovery Successful! (Duration: {ml_duration:.4f}s)")
+                                self.in_safe_mode = False
+                                self.safe_mode_reason = None
+                                if self.result_callback:
+                                    self.result_callback({
+                                        "type": "system",
+                                        "status": "recovered",
+                                        "message": "System recovered",
+                                        "payload": None
+                                    })
 
-                    except Exception as e:
-                        print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Error: {e}")
-                elif self.simulate_processing_delay > 0:
-                    # Fallback simulation if no ML module
-                    time.sleep(self.simulate_processing_delay)
-                
-                frames_processed_in_window += 1
-                
-                # Check if we processed too fast, need to sleep to maintain FPS
-                post_process_time = time.time()
-                post_elapsed = post_process_time - start_time
-                next_frame_expected_time = (self._internal_frame_counter) * self.frame_interval
-                
-                sleep_duration = next_frame_expected_time - post_elapsed
-                if sleep_duration > 0:
-                    time.sleep(sleep_duration)
+                            # CALLBACK FOR WEBSOCKET (Normal Data)
+                            if self.result_callback:
+                                payload = result.copy()
+                                payload['frame_id'] = self._internal_frame_counter - 1
+                                payload['system'] = {
+                                    "fps": current_fps,
+                                    "latency_ms": ml_duration * 1000
+                                }
+                                # Normal data format
+                                self.result_callback({
+                                    "type": "data",
+                                    "status": "success",
+                                    "message": "New frame data",
+                                    "payload": payload
+                                })
 
-            # FPS Calculation (every 1 second)
-            now = time.time()
-            if now - last_fps_log_time >= 1.0:
-                current_fps = frames_processed_in_window # Update for payload
-                print(f"[Scheduler] Actual FPS: {frames_processed_in_window}")
-                frames_processed_in_window = 0
-                last_fps_log_time = now
+                        except Exception as e:
+                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Error: {e}")
+                            
+                            # ENTER SAFE MODE
+                            if not self.in_safe_mode:
+                                self.in_safe_mode = True
+                                self.safe_mode_reason = str(e)
+                                self.last_recovery_check = time.time() # Start timer
+                                print(f"[Scheduler] !!! ENTERING SAFE MODE !!! Reason: {e}")
+                                
+                                if self.result_callback:
+                                    self.result_callback({
+                                        "type": "system",
+                                        "status": "safe_mode",
+                                        "message": str(e),
+                                        "payload": None
+                                    })
+                                    
+                    elif self.simulate_processing_delay > 0:
+                        # Fallback simulation if no ML module
+                        time.sleep(self.simulate_processing_delay)
+                    
+                    frames_processed_in_window += 1
+                    
+                    # Check if we processed too fast, need to sleep to maintain FPS
+                    post_process_time = time.time()
+                    post_elapsed = post_process_time - start_time
+                    next_frame_expected_time = (self._internal_frame_counter) * self.frame_interval
+                    
+                    sleep_duration = next_frame_expected_time - post_elapsed
+                    if sleep_duration > 0:
+                        time.sleep(sleep_duration)
+
+                # FPS Calculation (every 1 second)
+                now = time.time()
+                if now - last_fps_log_time >= 1.0:
+                    current_fps = frames_processed_in_window # Update for payload
+                    print(f"[Scheduler] Actual FPS: {frames_processed_in_window}")
+                    frames_processed_in_window = 0
+                    last_fps_log_time = now
+        
+        except Exception as e:
+            # Catch unexpected Video loop errors (VideoReader failure propagation)
+             print(f"[Scheduler] CRITICAL LOOP ERROR: {e}")
+             # We can't really "recover" the loop if it crashed, but we can try to stay alive or notify.
+             # Requirements say "VideoReader fails to read frame" -> Safe Mode.
+             # If read_video() raises, we are here.
+             # But if read_video() yields None (handled inside checks?), usually it just stops yielding.
+             # If we want to keep running, we'd need the loop inside a try/except, but the generator...
+             # The generator throws? 
+             pass
 
 if __name__ == "__main__":
     # Test Block

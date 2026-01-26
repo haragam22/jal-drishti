@@ -9,6 +9,17 @@ class DummyML:
         """
         pass
 
+    def set_failure_mode(self, enabled: bool, mode: str = "timeout"):
+        """
+        Enables or disables failure simulation.
+        
+        Args:
+            enabled (bool): True to active failure.
+            mode (str): 'timeout' (sleep > 0.2s) or 'error' (raise Exception).
+        """
+        self.failure_enabled = enabled
+        self.failure_mode = mode
+
     def run_inference(self, frame: np.ndarray) -> dict:
         """
         Simulates running ML inference on a single frame.
@@ -21,6 +32,16 @@ class DummyML:
         """
         start_time = time.time()
         
+        # CHECK FAILURES
+        if hasattr(self, 'failure_enabled') and self.failure_enabled:
+            if self.failure_mode == 'timeout':
+                # Sleep > 0.2s to trigger Safe Mode
+                print("[ML] SIMULATING TIMEOUT...")
+                time.sleep(0.3)
+            elif self.failure_mode == 'error':
+                print("[ML] SIMULATING EXCEPTION...")
+                raise RuntimeError("Simulated ML Crash")
+
         # Simulate inference delay (50ms - 100ms)
         delay = random.uniform(0.05, 0.1)
         time.sleep(delay)
