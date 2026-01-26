@@ -1,7 +1,8 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import StatusBar from './components/StatusBar';
 import VideoPanel from './components/VideoPanel';
 import AlertPanel from './components/AlertPanel';
+import ConnectionOverlay from './components/ConnectionOverlay';
 import LoginPage from './components/LoginPage';
 import useLiveStream from './hooks/useLiveStream';
 import useFakeStream from './hooks/useFakeStream';
@@ -29,7 +30,14 @@ const USE_FAKE_STREAM = false;
  */
 function App() {
   const [token, setToken] = useState(null);
-  const { frame, fps, isConnected } = useLiveStream(token);
+  const {
+    frame,
+    fps,
+    connectionStatus,
+    reconnectAttempt,
+    lastValidFrame,
+    manualReconnect
+  } = useLiveStream(token);
 
   // Use ref for previous state tracking (not useState - avoids re-renders)
   const prevStateRef = useRef(SYSTEM_STATES.SAFE_MODE);

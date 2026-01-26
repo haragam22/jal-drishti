@@ -3,7 +3,7 @@ import numpy as np
 import os
 from app.video.video_reader import VideoReader
 
-def create_dummy_video(filename="dummy.mp4", width=640, height=480, num_frames=30):
+def create_dummy_video(filename="dummy.mp4", width=640, height=480, num_frames=1200):
     # Use MP4V codec
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(filename, fourcc, 10.0, (width, height))

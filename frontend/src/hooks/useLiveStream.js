@@ -22,12 +22,34 @@ const useLiveStream = (token) => {
     const lastFrameIdRef = useRef(-1);
     const connectRef = useRef(null);
 
-    useEffect(() => {
-        // Connect to WebSocket
+    const getReconnectDelay = useCallback((attempt) => {
+        return Math.min(
+            RECONNECT_CONFIG.BASE_DELAY_MS * (2 ** attempt),
+            RECONNECT_CONFIG.MAX_DELAY_MS
+        );
+    }, []);
+
+    const cleanup = useCallback(() => {
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+        if (streamIntervalRef.current) {
+            clearInterval(streamIntervalRef.current);
+            streamIntervalRef.current = null;
+        }
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+        }
+    }, []);
+
+    // Connect to WebSocket function
+    const connect = useCallback(() => {
         if (!token) return;
 
-        const connect = () => {
-            const ws = new WebSocket(`${BACKEND_URL}?token=${token}`);
+        try {
+            const ws = new WebSocket(`${WS_CONFIG.URL}?token=${token}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
@@ -99,6 +121,8 @@ const useLiveStream = (token) => {
                     console.log(`[WS] Reconnecting in ${delay}ms (attempt ${nextAttempt}/${RECONNECT_CONFIG.MAX_ATTEMPTS})`);
 
                     reconnectTimeoutRef.current = setTimeout(() => {
+                        // Use the ref to call the latest version of connect if needed, 
+                        // or just call connect() since it's now stable via useCallback
                         if (connectRef.current) {
                             connectRef.current();
                         }
@@ -116,10 +140,13 @@ const useLiveStream = (token) => {
             console.error('[WS] Failed to create WebSocket:', err);
             setConnectionStatus(CONNECTION_STATES.FAILED);
         }
-    }, [cleanup, getReconnectDelay]);
+    }, [token, getReconnectDelay]);
 
-    // Store connect in ref for use in callbacks
-    connectRef.current = connect;
+    // Keep the ref updated for timeout callbacks
+    useEffect(() => {
+        connectRef.current = connect;
+    }, [connect]);
+
 
     // Manual reconnect (for retry button after FAILED state)
     const manualReconnect = useCallback(() => {
@@ -145,7 +172,7 @@ const useLiveStream = (token) => {
                 clearInterval(fpsIntervalRef.current);
             }
         };
-    }, [token]);
+    }, [connect, cleanup]);
 
     return {
         frame,
