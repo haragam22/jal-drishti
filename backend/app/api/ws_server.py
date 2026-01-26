@@ -65,11 +65,15 @@ async def websocket_endpoint(websocket: WebSocket):
         active_connection = None
 
 
-def broadcast(payload: dict):
+def broadcast(message: dict):
     """
-    Sends data to the active WebSocket connection.
+    Sends a dictionary message to the active WebSocket connection.
     This function is intended to be called from the Scheduler thread.
     It uses asyncio.run_coroutine_threadsafe to jump to the main event loop.
+    
+    Args:
+        message (dict): The full JSON-serializable message to send. 
+                        If the message does not contain 'type', it will be wrapped in a default data envelope.
     """
     global active_connection, _event_loop
     
@@ -87,13 +91,19 @@ def broadcast(payload: dict):
     async def _send():
         if active_connection:
             try:
-                # Wrap payload in standardized JSON structure
-                await active_connection.send_json({
-                    "type": "data",
-                    "status": "success",
-                    "message": "New frame data",
-                    "payload": payload
-                })
+                # Check if message is already formatted (has 'type')
+                # If so, send as is.
+                # If not, wrap it (backward compatibility or simple usage)
+                if isinstance(message, dict) and "type" in message:
+                     await active_connection.send_json(message)
+                else:
+                    # Default wrap
+                    await active_connection.send_json({
+                        "type": "data",
+                        "status": "success",
+                        "message": "New frame data",
+                        "payload": message
+                    })
             except Exception as e:
                  print(f"[WS] Send Error: {e}")
 
