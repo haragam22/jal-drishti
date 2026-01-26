@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 
 const BACKEND_URL = "ws://127.0.0.1:8000/ws/stream";
 
-const useLiveStream = () => {
+const useLiveStream = (token) => {
     const [frame, setFrame] = useState(null);
     const [fps, setFps] = useState(0);
     const [isConnected, setIsConnected] = useState(false);
@@ -14,8 +14,10 @@ const useLiveStream = () => {
 
     useEffect(() => {
         // Connect to WebSocket
+        if (!token) return;
+
         const connect = () => {
-            const ws = new WebSocket(BACKEND_URL);
+            const ws = new WebSocket(`${BACKEND_URL}?token=${token}`);
             wsRef.current = ws;
 
             ws.onopen = () => {
@@ -72,7 +74,7 @@ const useLiveStream = () => {
             if (fpsIntervalRef.current) clearInterval(fpsIntervalRef.current);
             if (streamIntervalRef.current) clearInterval(streamIntervalRef.current);
         };
-    }, []);
+    }, [token]);
 
     return { frame, fps, isConnected };
 };

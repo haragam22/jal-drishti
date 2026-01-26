@@ -2,11 +2,13 @@ import React, { useState, useEffect } from 'react';
 import StatusBar from './components/StatusBar';
 import VideoPanel from './components/VideoPanel';
 import AlertPanel from './components/AlertPanel';
+import LoginPage from './components/LoginPage';
 import useLiveStream from './hooks/useLiveStream';
 import './App.css';
 
 function App() {
-  const { frame, fps, isConnected } = useLiveStream();
+  const [token, setToken] = useState(null);
+  const { frame, fps, isConnected } = useLiveStream(token);
 
   // If waiting for first frame, show loading or initial state
   const currentFrame = frame || {
@@ -14,6 +16,10 @@ function App() {
     visibility_score: 0,
     image_data: null
   };
+
+  if (!token) {
+    return <LoginPage onLogin={setToken} />;
+  }
 
   return (
     <div className="app-container">
