@@ -49,48 +49,43 @@ async def startup_event():
     # Capture the main event loop for the WS server to use
     loop = asyncio.get_running_loop()
     ws_server.set_event_loop(loop)
-    
+    import os
     # Initialize Core Pipeline
-    # 1. Setup Video Source (Configurable via Env or defaults to backend/dummy.mp4)
-    # The RawVideoSource class handles logic, but we can verify here.
-    try:
-        reader = RawVideoSource() # Uses VIDEO_SOURCE_PATH env or default
-    except Exception as e:
-         print(f"[Startup] Error initializing Video Source: {e}")
-         return
-
-    ml_module = DummyML()
+    from app.services.ml_service import ml_service
     
-    # 2. Define Callbacks
+    video_path = "backend/dummy.mp4"
+    if not os.path.exists(video_path):
+        # Check relative to root as well
+        if os.path.exists("dummy.mp4"):
+            video_path = "dummy.mp4"
+        else:
+            print(f"[Startup] Warning: {video_path} not found.")
+            return
     
-    # ML Result Callback (WS Server for ML data)
-    def on_ml_result(payload):
-        ws_server.broadcast(payload)
+    reader = VideoReader(video_path)
 
-    # Raw Frame Callback (Stream Manager)
-    # Scheduler runs in a thread, so we need to schedule the async broadcast on the main event loop
-    def on_raw_frame(frame, frame_id, timestamp):
-        # Fire-and-forget broadcast
-        if video_stream_manager.active_connections:
-            asyncio.run_coroutine_threadsafe(
-                video_stream_manager.broadcast_raw_frame(frame, frame_id, timestamp), 
-                loop
-            )
+    # Callback to push to WebSocket
+    def on_result(envelope):
+        """
+        Flatten the payload for the frontend.
+        The frontend expects 'state', 'image_data', etc. at the top level.
+        """
+        if envelope.get("type") == "data" and "payload" in envelope:
+            flat_payload = {
+                "type": "data",
+                **envelope["payload"]
+            }
+            ws_server.broadcast(flat_payload)
+        else:
+            ws_server.broadcast(envelope)
 
-    # 3. Initialize & Start Scheduler
-    # We pass the raw_callback to decouple raw streaming
-    scheduler = FrameScheduler(
-        reader, 
-        target_fps=15, 
-        ml_module=ml_module, 
-        result_callback=on_ml_result,
-        raw_callback=on_raw_frame
-    )
+    # Scheduler
+    scheduler = FrameScheduler(reader, target_fps=5, ml_module=ml_service, result_callback=on_result)
     
     # Run in background thread
     t = threading.Thread(target=scheduler.run, daemon=True)
     t.start()
-    print("[Startup] Scheduler thread started.")
+    print("[Startup] Scheduler thread started with real ML Engine.")
 
 
 @app.get("/")

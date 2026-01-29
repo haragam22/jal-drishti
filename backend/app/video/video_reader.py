@@ -62,10 +62,7 @@ class RawVideoSource:
         Generator function to read video frame by frame.
         
         Yields:
-            tuple: (frame, frame_id, timestamp)
-                - frame (numpy.ndarray): RGB frame (H, W, 3), uint8
-                - frame_id (int): Monotonically increasing frame index
-                - timestamp (float): Current system time (simulated live feed)
+            numpy.ndarray: The BGR frame with shape (H, W, 3) and dtype uint8.
         """
         cap = cv2.VideoCapture(self.video_path)
         
@@ -82,30 +79,21 @@ class RawVideoSource:
                 ret, frame = cap.read()
                 
                 if not ret:
-                    print("[RawVideoSource] Info: End of video reached. Restarting loop...")
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
+                    print("[VideoReader] Info: End of video reached or cannot read frame.")
+                    break
                 
-                # Timestamp generation (Simulate live camera)
-                timestamp = time.time()
-                
-                # Conversion: BGR -> RGB
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Validation: Ensure uint8
-                if rgb_frame.dtype != 'uint8':
-                     rgb_frame = rgb_frame.astype('uint8')
+                # Validation Logic
+                # Ensure dtype is uint8
+                if frame.dtype != 'uint8':
+                     frame = frame.astype('uint8')
 
-                # Debug Hook: Save frames
-                if self.debug_mode and frame_id < self.debug_frame_limit:
-                    debug_path = os.path.join(self.debug_dir, f"frame_{frame_id:04d}.jpg")
-                    # Save as BGR because cv2.imwrite expects BGR
-                    cv2.imwrite(debug_path, frame)
-                    print(f"[RawVideoSource] Saved debug frame: {debug_path}")
-
-                yield rgb_frame, frame_id, timestamp
+                # Log basic frame info
+                # "Outputs basic validation logs for each frame"
+                print(f"[VideoReader] Frame {frame_index}: Shape={frame.shape}, Dtype={frame.dtype}")
                 
-                frame_id += 1
+                yield frame
+                
+                frame_index += 1
                 
         except Exception as e:
             print(f"[RawVideoSource] Error processing video: {e}")
