@@ -1,3 +1,5 @@
+import RawFeedPanel from './components/RawFeedPanel';
+
 import React, { useRef, useEffect, useState } from 'react';
 import StatusBar from './components/StatusBar';
 import VideoPanel from './components/VideoPanel';
@@ -80,11 +82,17 @@ function App() {
       />
 
       <main className="main-content">
-        <VideoPanel
-          title="Raw Feed"
-          imageSrc="https://placehold.co/640x480/333/FFF?text=Raw+Feed"
-          isEnhanced={false}
-        />
+        {/* Real-time RAW Feed connected independently via WS */}
+        <div className="video-panel">
+          <div className="video-header">
+            <h3 className="video-title">Raw Feed (Sensor)</h3>
+            <span className="badge-live" style={{ background: '#333' }}>RAW</span>
+          </div>
+          <div className="video-content">
+            <RawFeedPanel />
+          </div>
+        </div>
+
         <VideoPanel
           title="Enhanced Feed"
           imageSrc={displayFrame.image_data}

@@ -76,13 +76,19 @@ const useLiveStream = (token) => {
                     lastFrameIdRef.current = response.frame_id || lastFrameIdRef.current;
 
                     // Normalize response to Phase-2 schema with safe defaults
+                    // Normalize image_data to a proper data URL if it's a base64 string
+                    let imageData = response.image_data || null;
+                    if (imageData && typeof imageData === 'string' && !imageData.startsWith('data:')) {
+                        imageData = `data:image/jpeg;base64,${imageData}`;
+                    }
+
                     const normalizedFrame = {
                         timestamp: response.timestamp || new Date().toISOString(),
                         state: response.state || SYSTEM_STATES.SAFE_MODE,
                         max_confidence: response.max_confidence ?? 0,
                         detections: response.detections || [],
                         visibility_score: response.visibility_score ?? 0,
-                        image_data: response.image_data || null,
+                        image_data: imageData,
                         frame_id: response.frame_id,
                         system: {
                             fps: response.system?.fps ?? null,

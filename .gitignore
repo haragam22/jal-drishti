@@ -2,6 +2,10 @@ ml-engine/data/enhancement/raw
 ml-engine/data/enhancement/paired
 ml-engine/data/detection/backgrounds
 ml-engine/outputs/pipeline/multi_test
+final_simulation_work.md
+debug_frames
+dummy1.mp4
+Real-Time Simulation Pipeline – Complete Context & Intent Document.md
 ### Node ###
 ml-engine/venv
 backend/venv

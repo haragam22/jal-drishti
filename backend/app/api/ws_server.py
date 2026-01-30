@@ -1,16 +1,14 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import json
 import asyncio
-from typing import Optional
+from typing import Optional, Set
 
 router = APIRouter()
 
-# Global variable to hold the single active connection
-active_connection: Optional[WebSocket] = None
+# Global variable to hold active connections
+active_connections: Set[WebSocket] = set()
 
 # Global Event Loop reference for thread-safe messaging
-# We will set this when the server starts in main.py if needed, 
-# or we can assume ws handlers run in the main loop.
 _event_loop = None
 
 def set_event_loop(loop):
@@ -19,28 +17,11 @@ def set_event_loop(loop):
 
 @router.websocket("/stream")
 async def websocket_endpoint(websocket: WebSocket):
-    global active_connection
+    global active_connections
     
-    # Requirement: Accept exactly one active client at a time
-    # IMPORTANT: Check BEFORE accepting to prevent race conditions
-    if active_connection is not None:
-        # Accept first to be able to send a message
-        await websocket.accept()
-        print("[WS] Rejecting secondary connection.")
-        # Send JSON error before closing
-        await websocket.send_json({
-            "type": "system",
-            "status": "error",
-            "message": "Connection limit reached",
-            "payload": None
-        })
-        await websocket.close()
-        return
-
-    # Accept and set as active ATOMICALLY
     await websocket.accept()
-    active_connection = websocket
-    print("[WS] Client connected.")
+    active_connections.add(websocket)
+    print(f"[WS] Client connected. Total: {len(active_connections)}")
     
     # Send connection success message
     await websocket.send_json({
@@ -53,45 +34,31 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             # Keep the connection open.
-            # Use receive() to handle all message types properly
             message = await websocket.receive()
-            
-            # Check the message type
             if message["type"] == "websocket.disconnect":
                 break
-            elif message["type"] == "websocket.receive":
-                # Handle text or bytes data if needed
-                data = message.get("text") or message.get("bytes")
-                # Optional: handle ping/pong or commands
-                pass
+            # Handle other messages if needed
             
     except WebSocketDisconnect:
         print("[WS] Client disconnected (exception).")
     except Exception as e:
         print(f"[WS] Error: {e}")
     finally:
-        # ALWAYS reset active_connection when this handler exits
-        print("[WS] Client disconnected.")
-        active_connection = None
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+        print(f"[WS] Client disconnected. Total: {len(active_connections)}")
 
 
 def broadcast(message: dict):
     """
-    Sends a dictionary message to the active WebSocket connection.
-    This function is intended to be called from the Scheduler thread.
-    It uses asyncio.run_coroutine_threadsafe to jump to the main event loop.
-    
-    Args:
-        message (dict): The full JSON-serializable message to send. 
-                        If the message does not contain 'type', it will be wrapped in a default data envelope.
+    Sends a dictionary message to ALL active WebSocket connections.
     """
-    global active_connection, _event_loop
+    global active_connections, _event_loop
     
-    if active_connection is None:
+    if not active_connections:
         return # No one to send to
         
     if _event_loop is None:
-        # Fallback if loop wasn't set explicitly (though it should be)
         try:
             _event_loop = asyncio.get_event_loop()
         except:
@@ -99,23 +66,28 @@ def broadcast(message: dict):
              return
 
     async def _send():
-        if active_connection:
-            try:
-                # Check if message is already formatted (has 'type')
-                # If so, send as is.
-                # If not, wrap it (backward compatibility or simple usage)
-                if isinstance(message, dict) and "type" in message:
-                     await active_connection.send_json(message)
-                else:
-                    # Default wrap
-                    await active_connection.send_json({
-                        "type": "data",
-                        "status": "success",
-                        "message": "New frame data",
-                        "payload": message
-                    })
-            except Exception as e:
-                 print(f"[WS] Send Error: {e}")
+        if active_connections:
+            # Create a copy to avoid runtime errors if set changes during iteration
+            for connection in list(active_connections):
+                try:
+                    if isinstance(message, dict) and "type" in message:
+                         await connection.send_json(message)
+                    else:
+                        await connection.send_json({
+                            "type": "data",
+                            "status": "success",
+                            "message": "New frame data",
+                            "payload": message
+                        })
+                except RuntimeError as re:
+                    # Catch ASGI "Unexpected message" errors which happen when sending to closed socket
+                    # This is common during rapid disconnects/reconnects
+                    if "websocket.close" in str(re) or "response already completed" in str(re):
+                        pass 
+                    else:
+                         print(f"[WS] Send Runtime Error: {re}")
+                except Exception as e:
+                     print(f"[WS] Send Error: {e}")
 
     # Schedule the send on the main loop
     asyncio.run_coroutine_threadsafe(_send(), _event_loop)

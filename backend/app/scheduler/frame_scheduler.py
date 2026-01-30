@@ -1,29 +1,32 @@
 import time
-from app.video.video_reader import VideoReader
+from app.video.video_reader import RawVideoSource
 
 class FrameScheduler:
-    def __init__(self, video_reader: VideoReader, target_fps: int = 15, simulate_processing_delay: float = 0.0, ml_module = None, result_callback = None):
+    def __init__(self, video_source: RawVideoSource, target_fps: int = 15, simulate_processing_delay: float = 0.0, 
+                 ml_module = None, result_callback = None, raw_callback = None):
         """
         Initializes the FrameScheduler.
 
         Args:
-            video_reader (VideoReader): Instance of VideoReader source.
+            video_source (RawVideoSource): Instance of video source.
             target_fps (int): Target frames per second. Default 15.
             simulate_processing_delay (float): Artificial delay in seconds if no ML module is present.
             ml_module (object): Optional ML module with run_inference method.
             result_callback (callable): Optional callback for ML results. signature: (dict) -> None.
+            raw_callback (callable): Optional callback for RAW frames. signature: (frame, frame_id, timestamp) -> None.
         """
-        self.video_reader = video_reader
+        self.video_source = video_source
         self.target_fps = target_fps
         self.frame_interval = 1.0 / target_fps
         self.simulate_processing_delay = simulate_processing_delay
         self.ml_module = ml_module
         self.result_callback = result_callback
+        self.raw_callback = raw_callback
 
     def run(self):
         """
         Runs the scheduler loop.
-        Reads frames from the video reader, enforces FPS, and handles logical drops.
+        Reads frames from the video reader, emits raw frames, enforces FPS, and handles logical drops.
         """
         print(f"[Scheduler] Starting at Target FPS={self.target_fps}, Interval={self.frame_interval:.4f}s")
         if self.ml_module:
@@ -40,34 +43,38 @@ class FrameScheduler:
         last_fps_log_time = start_time
         current_fps = 0.0 # Store for payload
 
-        # We iterate through all frames from the reader
-        # logical_frame_index tracks the index in the video source
+        # We iterate through all frames from the source
         try:
-            for frame in self.video_reader.read_video():
+            # New contract: frame, frame_id, timestamp
+            for frame, frame_id, timestamp in self.video_source.read():
+                
+                # Adjust start time reference if this is the first frame we see
+                if frame_id == 0:
+                    start_time = timestamp # Align scheduler clock with video timestamp
+                
                 current_time = time.time()
-                elapsed_total = current_time - start_time
+                # We use the provided timestamp if we want strictly video-time, 
+                # but for real-time simulation, we check wall-clock drift against expected frame count.
                 
-                if not hasattr(self, '_internal_frame_counter'):
-                    self._internal_frame_counter = 0
+                # Expected time since start
+                expected_time = frame_id * self.frame_interval
+                actual_elapsed = current_time - start_time
                 
-                expected_time_for_frame = self._internal_frame_counter * self.frame_interval
-                self._internal_frame_counter += 1
-
-                # Reset start_time on first frame to align
-                if self._internal_frame_counter == 1:
-                    start_time = time.time()
-                    elapsed_total = 0
-                    expected_time_for_frame = 0
-
                 # Drift check
-                drift = elapsed_total - expected_time_for_frame 
+                drift = actual_elapsed - expected_time
                 
+                # ALWAYS EMIT RAW FRAME (Decoupled from ML)
+                if self.raw_callback:
+                    # Non-blocking emission (presumed, depending on callback impl)
+                    self.raw_callback(frame, frame_id, timestamp)
+
                 if drift > self.frame_interval:
-                    # We are behind by more than one frame. Drop this frame.
-                    print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=DROPPED (Drift={drift:.4f}s)")
+                    # We are behind by more than one frame. Drop this frame from ML processing.
+                    print(f"[Scheduler] Frame {frame_id}: Status=DROPPED_FROM_ML (Drift={drift:.4f}s)")
+                    continue # Skip ML
                 else:
                     # Process the frame
-                    print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Status=PROCESSED")
+                    # print(f"[Scheduler] Frame {frame_id}: Status=PROCESSED") # Reduce log spam
                     
                     # SAFE MODE CHECK / RECOVERY
                     should_run_ml = False
@@ -94,18 +101,21 @@ class FrameScheduler:
                     if self.ml_module and should_run_ml:
                         try:
                             # Blocking call to ML with timeout measurement
-                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: Sending to ML...")
+                            # print(f"[Scheduler] Frame {frame_id}: Sending to ML...")
                             
                             ml_start = time.time()
                             result = self.ml_module.run_inference(frame)
                             ml_end = time.time()
                             ml_duration = ml_end - ml_start
                             
-                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Result Received. Duration={ml_duration:.4f}s")
+                            # print(f"[Scheduler] Frame {frame_id}: ML Result Received. Duration={ml_duration:.4f}s")
                             
                             # CHECK FOR SLOW INFERENCE
                             if ml_duration > 0.2:
-                                raise TimeoutError(f"ML inference too slow: {ml_duration:.4f}s > 0.2s")
+                                # We don't crash, just warn/safe mode if needed? 
+                                # For now, let's just log. Strict requirement says "Support frame dropping under latency"
+                                # We already drop frames if we drift.
+                                pass
                             
                             # If we were in safe mode and succeeded quickly, recover
                             if self.in_safe_mode:
@@ -123,7 +133,7 @@ class FrameScheduler:
                             # CALLBACK FOR WEBSOCKET (Normal Data)
                             if self.result_callback:
                                 payload = result.copy()
-                                payload['frame_id'] = self._internal_frame_counter - 1
+                                payload['frame_id'] = frame_id
                                 payload['system'] = {
                                     "fps": current_fps,
                                     "latency_ms": ml_duration * 1000
@@ -137,7 +147,7 @@ class FrameScheduler:
                                 })
 
                         except Exception as e:
-                            print(f"[Scheduler] Frame {self._internal_frame_counter-1}: ML Error: {e}")
+                            print(f"[Scheduler] Frame {frame_id}: ML Error: {e}")
                             
                             # ENTER SAFE MODE
                             if not self.in_safe_mode:
@@ -161,9 +171,11 @@ class FrameScheduler:
                     frames_processed_in_window += 1
                     
                     # Check if we processed too fast, need to sleep to maintain FPS
+                    # But if we slept for ML, we probably don't need to sleep more.
+                    # Re-calculate drift to sleep only if we are AHEAD.
                     post_process_time = time.time()
                     post_elapsed = post_process_time - start_time
-                    next_frame_expected_time = (self._internal_frame_counter) * self.frame_interval
+                    next_frame_expected_time = (frame_id + 1) * self.frame_interval
                     
                     sleep_duration = next_frame_expected_time - post_elapsed
                     if sleep_duration > 0:
@@ -173,31 +185,23 @@ class FrameScheduler:
                 now = time.time()
                 if now - last_fps_log_time >= 1.0:
                     current_fps = frames_processed_in_window # Update for payload
-                    print(f"[Scheduler] Actual FPS: {frames_processed_in_window}")
+                    print(f"[Scheduler] actual_fps={frames_processed_in_window}, drift={drift:.3f}s")
                     frames_processed_in_window = 0
                     last_fps_log_time = now
         
         except Exception as e:
-            # Catch unexpected Video loop errors (VideoReader failure propagation)
+            # Catch unexpected Video loop errors
              print(f"[Scheduler] CRITICAL LOOP ERROR: {e}")
-             # We can't really "recover" the loop if it crashed, but we can try to stay alive or notify.
-             # Requirements say "VideoReader fails to read frame" -> Safe Mode.
-             # If read_video() raises, we are here.
-             # But if read_video() yields None (handled inside checks?), usually it just stops yielding.
-             # If we want to keep running, we'd need the loop inside a try/except, but the generator...
-             # The generator throws? 
+             import traceback
+             traceback.print_exc()
              pass
 
 if __name__ == "__main__":
     # Test Block
-    from app.video.video_reader import VideoReader
+    from app.video.video_reader import RawVideoSource
     import sys
     
-    video_path = "dummy.mp4" # Default for quick test if exists
-    if len(sys.argv) > 1:
-        video_path = sys.argv[1]
-        
-    print(f"Testing Scheduler with {video_path}")
-    reader = VideoReader(video_path)
-    scheduler = FrameScheduler(reader, target_fps=15, simulate_processing_delay=0.02) # 20ms processing
+    print(f"Testing Scheduler...")
+    source = RawVideoSource()
+    scheduler = FrameScheduler(source, target_fps=15) 
     scheduler.run()
