@@ -1,9 +1,12 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import stream, ws_server
+from fastapi.staticfiles import StaticFiles
+from app.api import stream, ws_server, phone_upload
+from app.auth import auth_router
 
 # Core Modules
 from app.video.video_reader import RawVideoSource
+from app.video.phone_source import PhoneCameraSource, phone_camera_source
 from app.scheduler.frame_scheduler import FrameScheduler
 from app.ml.dummy_ml import DummyML
 from app.services.video_stream_manager import video_stream_manager
@@ -28,6 +31,21 @@ app = FastAPI(title="Jal-Drishti Backend", version="1.0.0")
 _scheduler_thread = None
 _shutdown_event = threading.Event()
 
+# Global references for graceful shutdown
+_scheduler_thread = None
+_shutdown_event = threading.Event()
+
+# Mount static files directory for phone_camera.html
+# Access at: http://<host>:<port>/static/phone_camera.html
+# __file__ is backend/app/main.py, so we go up twice to get backend/
+_app_dir = os.path.dirname(os.path.abspath(__file__))  # backend/app
+_backend_dir = os.path.dirname(_app_dir)               # backend
+static_dir = os.path.join(_backend_dir, "static")
+print(f"[Main] Static directory: {static_dir}, exists: {os.path.exists(static_dir)}")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    print("[Main] Static files mounted at /static")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +57,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(ws_server.router, prefix="/ws", tags=["websocket"])
+app.include_router(phone_upload.router, prefix="/ws", tags=["phone"])
 
 # --- RAW FEED WEBSOCKET ---
 @app.websocket("/ws/raw_feed")
@@ -65,26 +84,39 @@ async def startup_event():
     # Capture the main event loop for the WS server to use
     loop = asyncio.get_running_loop()
     ws_server.set_event_loop(loop)
-    
-    # Initialize ML service (ML engine handles device selection internally)
+    import os
+    # Initialize Core Pipeline
     from app.services.ml_service import MLService
-
+    
     debug_mode = config.get("ml_service.debug_mode", True)
     ml_service = MLService(debug_mode=debug_mode)
     # Expose the single MLService instance via the FastAPI app state so
     # other routers (e.g. stream) can access it without importing a global.
     app.state.ml_service = ml_service
+    # SOURCE SELECTION LOGIC
+    # =====================================================
+    # INPUT_SOURCE env var controls which video source to use:
+    # - "video" (default): Use dummy.mp4 file (existing behavior)
+    # - "phone": Use phone camera via WebSocket upload
+    # =====================================================
+    input_source = os.getenv("INPUT_SOURCE", "video").lower()
     
-    video_path = config.get("video.file_path", "backend/dummy.mp4")
-    if not os.path.exists(video_path):
-        # Check relative to root as well
-        if os.path.exists("dummy.mp4"):
-            video_path = "dummy.mp4"
-        else:
-            logger.warning(f"[Startup] Warning: {video_path} not found.")
-            return
-    
-    reader = RawVideoSource(video_path)
+    if input_source == "phone":
+        # Use phone camera source
+        # Frames are injected via /ws/upload endpoint from phone_camera.html
+        reader = phone_camera_source
+        print("[Startup] Using PHONE CAMERA source. Connect phone to /ws/upload")
+    else:
+        video_path = config.get("video.file_path", "backend/dummy.mp4")
+        if not os.path.exists(video_path):
+            # Check relative to root as well
+            if os.path.exists("dummy.mp4"):
+                video_path = "dummy.mp4"
+            else:
+                print(f"[Startup] Warning: {video_path} not found.")
+                return
+        
+        reader = RawVideoSource(video_path)
 
     # Callback to push to WebSocket
     def on_result(envelope):
