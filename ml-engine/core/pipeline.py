@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 import cv2
 import datetime
@@ -74,7 +75,7 @@ class JalDrishtiEngine:
 
         try:
             # --- Step 2: Pre-process (GAN Side) ---
-            # Resize to 256x256
+            # Resize to 256x256 (Native GAN resolution) for optimal FPS (User requested revert from 384)
             original_h, original_w = frame.shape[:2]
             img_resized = cv2.resize(frame, (256, 256))
             
@@ -93,18 +94,32 @@ class JalDrishtiEngine:
             enhanced_tensor = (enhanced_tensor + 1.0) / 2.0
             enhanced_tensor = torch.clamp(enhanced_tensor, 0.0, 1.0) # Safety Clamp
 
-            # Resize to YOLO input size (640x640)
-            # YOLOv8 handles resizing internally, but we pass the enhanced tensor/image
-            # Convert back to numpy uint8 for YOLO / Visuals
+            # Resize to YOLO input size (640x640) - Actually, we want to restore original aspect ratio
+            # Use PyTorch Interpolation as per ML Doc (better quality)
+            # Input: (1, 3, 256, 256) -> Output: (1, 3, original_h, original_w)
+            enhanced_tensor = F.interpolate(
+                enhanced_tensor.unsqueeze(0) if len(enhanced_tensor.shape) == 3 else enhanced_tensor, 
+                size=(original_h, original_w), 
+                mode='bilinear', 
+                align_corners=False
+            )
+            
+            # --- Output Clamping (Risk B Fix) ---
+            # Ensure values are strictly [0, 1] before casting
+            enhanced_tensor = torch.clamp(enhanced_tensor, 0.0, 1.0)
+
+            # Convert to numpy uint8
+            # Shape is (1, 3, H, W) -> squeeze -> (3, H, W) -> permute -> (H, W, 3)
             enhanced_np = enhanced_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-            enhanced_np_uint8 = (enhanced_np * 255).astype(np.uint8)
+            
+            # Multiply by 255 and CLIP to avoid wrap-around noise
+            enhanced_np_uint8 = np.clip(enhanced_np * 255, 0, 255).astype(np.uint8)
             
             # Convert RGB (GAN) -> BGR (OpenCV/YOLO expectation)
             enhanced_np_uint8 = cv2.cvtColor(enhanced_np_uint8, cv2.COLOR_RGB2BGR)
-            
-            # Optional: Upscale for clearer detection if needed, or pass 256x256
-            # Plan says: Resize -> 640x640 (bilinear)
-            enhanced_cv = cv2.resize(enhanced_np_uint8, (640, 640))
+
+            # Final output for display/inference
+            enhanced_cv = enhanced_np_uint8
 
             # --- Step 5: YOLOv8 Inference ---
             results = self.yolo.predict(enhanced_cv, verbose=False, conf=CONFIDENCE_THRESHOLD)
@@ -123,12 +138,12 @@ class JalDrishtiEngine:
                 label = self.yolo.names[cls]
                 
                 # We can enforce "anomaly" label per plan constraint, or keep real labels
-                # Plan says: Label (generic: anomaly)
+                # User requested specific labels now
                 
                 detections.append({
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
                     "confidence": round(conf, 3),
-                    "label": "anomaly"  # Enforcing generic label
+                    "label": label  # Using specific label (e.g. "shark", "diver")
                 })
                 
                 if conf > max_conf:
