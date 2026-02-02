@@ -93,6 +93,32 @@ async def startup_event():
     # Expose the single MLService instance via the FastAPI app state so
     # other routers (e.g. stream) can access it without importing a global.
     app.state.ml_service = ml_service
+    # Probe / warm ML-engine: try health and optionally do a quick warm inference if available
+    def _probe_and_warm():
+        try:
+            info = ml_service.probe()
+            if info and info.get('device'):
+                logger.info(f"[Startup] ML engine reported device: {info.get('device')}")
+            # If ML-engine is up, do one small warmup (non-blocking) to ensure models are resident
+            try:
+                import numpy as _np
+                black = _np.zeros((480, 600, 3), dtype=_np.uint8)
+                ml_service.run_inference(black)
+                logger.info("[Startup] ML engine warmup inference completed")
+            except Exception:
+                logger.debug("[Startup] ML warmup inference failed or ML-engine not ready yet")
+        except Exception:
+            logger.debug("[Startup] ML probe failed; ML-engine likely unavailable at startup")
+
+    warm_thread = threading.Thread(target=_probe_and_warm, daemon=True)
+    warm_thread.start()
+    # Wait up to 7s for ML-engine to respond to health/warmup
+    warm_start = time.time()
+    while time.time() - warm_start < 7.0:
+        if getattr(ml_service, 'device_cached', None) is not None:
+            logger.info("[Startup] ML probe detected device: %s", ml_service.device_cached)
+            break
+        time.sleep(0.1)
     # Warmup: initialize engine in background and wait up to 7 seconds
     # so the first real frames sent to ML don't incur long init delay.
     def _warmup_engine():
@@ -177,13 +203,16 @@ async def startup_event():
             if not video_stream_manager.is_shutting_down:
                 logger.error(f"[Startup] Error scheduling raw frame broadcast: {e}")
 
-    target_fps = config.get("performance.target_fps", 5)
+    target_fps = config.get("performance.target_fps", 12)
     scheduler = FrameScheduler(reader, target_fps=target_fps, ml_module=ml_service, result_callback=on_result, raw_callback=raw_frame_callback, shutdown_event=_shutdown_event)
     
     # Run in background thread and store reference for shutdown
     global _scheduler_thread
-    _scheduler_thread = threading.Thread(target=scheduler.run, daemon=False)  # daemon=False ensures thread joins on shutdown
+    # Make the scheduler thread a daemon so it doesn't block process exit
+    _scheduler_thread = threading.Thread(target=scheduler.run, daemon=True)
     _scheduler_thread.start()
+    # Keep a reference to the scheduler for shutdown hooks
+    app.state.scheduler = scheduler
     logger.info("[Startup] Scheduler thread started (ML engine will initialize lazily).")
 
 
@@ -197,6 +226,16 @@ async def shutdown_event():
     # Signal the video stream manager to stop sending frames
     video_stream_manager.is_shutting_down = True
     
+    # Try to stop the video source if available (so read() can exit quickly)
+    try:
+        sched = getattr(app.state, 'scheduler', None)
+        if sched and getattr(sched, 'video_source', None):
+            try:
+                sched.video_source.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Signal the scheduler to stop immediately
     _shutdown_event.set()
     logger.info("[Shutdown] Signaled scheduler thread to stop.")

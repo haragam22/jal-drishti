@@ -83,7 +83,7 @@ const StatusBar = ({
                 <div className="metric-group right-align">
                     <span className="metric-label">LATENCY</span>
                     <span className="metric-value value-yellow">
-                        {latencyMs !== null ? `${latencyMs}ms` : '-- ms'}
+                        {latencyMs !== null ? `${Number(latencyMs).toFixed(1)}ms` : '-- ms'}
                     </span>
                 </div>
 

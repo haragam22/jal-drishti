@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { WS_CONFIG, RECONNECT_CONFIG } from '../constants';
 
+/**
+ * useRawFeed Hook
+ * 
+ * STABILIZATION FIX:
+ * - Frontend is PASSIVE subscriber
+ * - Keep last valid frame on disconnect (Issue 6)
+ * - No frameSrc = null on disconnect
+ */
 const useRawFeed = () => {
     const [status, setStatus] = useState('DISCONNECTED');
     const [resolution, setResolution] = useState(null);
@@ -11,6 +19,7 @@ const useRawFeed = () => {
     const lastFrameIdRef = useRef(-1);
     const reconnectTimeoutRef = useRef(null);
     const connectRef = useRef(null);
+    const lastValidFrameSrcRef = useRef(null);  // STABILIZATION: Keep last valid frame
 
     const getReconnectDelay = useCallback((attempt) => {
         return Math.min(
@@ -20,20 +29,7 @@ const useRawFeed = () => {
     }, []);
 
     const connect = useCallback(() => {
-        // Construct WS URL - explicitly triggering the raw_feed endpoint
-        // Assuming WS_CONFIG.URL is base like "ws://localhost:8000/ws" 
-        // We need to parse/modify it to "ws://localhost:8000/ws/raw_feed"
-
-        // Parse the Configured URL
-        // WS_CONFIG.URL is typically "ws://localhost:9000/ws/stream"
-        // We need "ws://localhost:9000/ws/raw_feed"
-
         try {
-            // Use URL object for robust parsing
-            // Note: 'ws' protocol might need 'http' for URL constructor if environment is weird, 
-            // but standard browsers handle ws/wss in URL object nowadays.
-            // If not, we can treat it as string.
-
             const rawConfigUrl = WS_CONFIG.URL;
             let finalUrl;
 
@@ -42,7 +38,6 @@ const useRawFeed = () => {
             } else if (rawConfigUrl.endsWith('/ws')) {
                 finalUrl = `${rawConfigUrl}/raw_feed`;
             } else {
-                // Fallback: URL might be just host
                 const wsUrl = rawConfigUrl.endsWith('/') ? rawConfigUrl.slice(0, -1) : rawConfigUrl;
                 finalUrl = `${wsUrl}/raw_feed`;
             }
@@ -63,7 +58,7 @@ const useRawFeed = () => {
                     const data = JSON.parse(event.data);
 
                     if (data.type === 'RAW_FRAME') {
-                        // Out-of-order check
+                        // Out-of-order check: render LATEST only (Issue 6)
                         if (data.frame_id <= lastFrameIdRef.current) {
                             return; // Drop old frame
                         }
@@ -76,8 +71,8 @@ const useRawFeed = () => {
                         // Decode base64 
                         const src = `data:image/jpeg;base64,${data.image}`;
                         setFrameSrc(src);
+                        lastValidFrameSrcRef.current = src;  // Cache for disconnect
 
-                        // If we were waiting for signal, update status
                         setStatus('STREAMING');
                     }
                 } catch (err) {
@@ -88,20 +83,24 @@ const useRawFeed = () => {
             ws.onclose = () => {
                 console.log('[RawFeed] Disconnected');
                 setStatus('DISCONNECTED');
-                setFrameSrc(null);
-                
+
+                // STABILIZATION FIX (Issue 6):
+                // DO NOT set frameSrc to null - keep showing last valid frame
+                // Visual continuity > frame accuracy
+                // REMOVED: setFrameSrc(null);
+
                 // Attempt reconnection
                 setReconnectAttempt((prev) => {
                     const nextAttempt = prev + 1;
                     const delay = getReconnectDelay(nextAttempt);
                     console.log(`[RawFeed] Reconnecting in ${delay}ms (attempt ${nextAttempt})`);
-                    
+
                     reconnectTimeoutRef.current = setTimeout(() => {
                         if (connectRef.current) {
                             connectRef.current();
                         }
                     }, delay);
-                    
+
                     return nextAttempt;
                 });
             };
@@ -136,7 +135,8 @@ const useRawFeed = () => {
     return {
         status,
         frameSrc,
-        resolution
+        resolution,
+        lastValidFrameSrc: lastValidFrameSrcRef.current  // Expose for fallback rendering
     };
 }
-    export default useRawFeed;
+export default useRawFeed;
