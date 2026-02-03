@@ -6,11 +6,15 @@ final_simulation_work.md
 debug_frames
 dummy1.mp4
 Real-Time Simulation Pipeline – Complete Context & Intent Document.md
+ml-engine/scripts/start_ml_engine_gpu.ps1
+backend/scripts/start_backend_cpu.ps1
+System Failure Analysis & Stabilization Plan.md
 ### Node ###
 ml-engine/venv
 backend/venv
 ml-engine/detection/yolo/weights/yolov8n.pt
 frontend/docs_helping
+pvt-docs
 *.pyc
 # Logs
 logs

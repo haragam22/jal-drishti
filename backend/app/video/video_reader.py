@@ -56,6 +56,9 @@ class RawVideoSource:
         if self.debug_mode:
             os.makedirs(self.debug_dir, exist_ok=True)
             print(f"[RawVideoSource] Debug mode ENABLED. Saving first {self.debug_frame_limit} frames to {self.debug_dir}/")
+        # Stoppable flag and capture handle for graceful shutdown
+        self._stop = False
+        self.cap = None
 
     def read(self) -> Generator[Tuple[np.ndarray, int, float], None, None]:
         """
@@ -64,9 +67,10 @@ class RawVideoSource:
         Yields:
             numpy.ndarray: The BGR frame with shape (H, W, 3) and dtype uint8.
         """
-        cap = cv2.VideoCapture(self.video_path)
+        # Store capture handle on the instance so it can be released from outside
+        self.cap = cv2.VideoCapture(self.video_path)
         
-        if not cap.isOpened():
+        if not self.cap.isOpened():
             print(f"[RawVideoSource] Error: Could not open video file {self.video_path}")
             return
 
@@ -76,7 +80,12 @@ class RawVideoSource:
 
         try:
             while True:
-                ret, frame = cap.read()
+                # Allow external stop requests to break the loop promptly
+                if getattr(self, '_stop', False):
+                    print("[RawVideoSource] Stop requested, exiting read loop")
+                    break
+
+                ret, frame = self.cap.read()
 
                 if not ret:
                     print("[VideoReader] Info: End of video reached or cannot read frame.")
@@ -111,8 +120,24 @@ class RawVideoSource:
             traceback.print_exc()
             
         finally:
-            cap.release()
+            try:
+                if getattr(self, 'cap', None) is not None:
+                    self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
             print("[RawVideoSource] Info: Video capture released.")
+
+    def stop(self):
+        """
+        Request the read loop to stop and release the capture handle.
+        """
+        self._stop = True
+        try:
+            if getattr(self, 'cap', None) is not None:
+                self.cap.release()
+        except Exception:
+            pass
 
 # Backward compatibility alias if needed, or we just update main.py
 VideoReader = RawVideoSource

@@ -46,8 +46,9 @@ class PhoneCameraSource:
                             can be used to check for graceful shutdown.
         """
         # Thread-safe queue for frames from WebSocket
-        # maxsize=10 provides backpressure if scheduler is slow
-        self.frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=10)
+        # PHASE-3 CORE: maxsize=2 for strict backpressure
+        # Only keep latest 2 frames, drop older immediately
+        self.frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=2)
         
         self.timeout = timeout
         self.running = False

@@ -1,207 +1,250 @@
 import time
+import threading
+import queue
 from app.video.video_reader import RawVideoSource
 
-class FrameScheduler:
-    def __init__(self, video_source: RawVideoSource, target_fps: int = 15, simulate_processing_delay: float = 0.0, 
-                 ml_module = None, result_callback = None, raw_callback = None):
-        """
-        Initializes the FrameScheduler.
 
-        Args:
-            video_source (RawVideoSource): Instance of video source.
-            target_fps (int): Target frames per second. Default 15.
-            simulate_processing_delay (float): Artificial delay in seconds if no ML module is present.
-            ml_module (object): Optional ML module with run_inference method.
-            result_callback (callable): Optional callback for ML results. signature: (dict) -> None.
-            raw_callback (callable): Optional callback for RAW frames. signature: (frame, frame_id, timestamp) -> None.
+class FrameScheduler:
+    """
+    PHASE-3 CORE REFACTORED SCHEDULER v2
+    
+    CRITICAL FIXES:
+    1. PACE-DRIVEN timing (NOT timestamp-driven)
+    2. ML admission control (1 in-flight request MAX)
+    3. ML is BEST-EFFORT async (never blocks raw stream)
+    4. Phone/live source clock is UNTRUSTED
+    """
+    
+    def __init__(self, video_source: RawVideoSource, target_fps: int = 12, 
+                 ml_module=None, result_callback=None, raw_callback=None, shutdown_event=None):
+        """
+        Initializes the FrameScheduler with background ML worker.
+        PHASE-3: Target 12-15 FPS for stable real-time performance.
         """
         self.video_source = video_source
         self.target_fps = target_fps
         self.frame_interval = 1.0 / target_fps
-        self.simulate_processing_delay = simulate_processing_delay
         self.ml_module = ml_module
         self.result_callback = result_callback
         self.raw_callback = raw_callback
+        self.shutdown_event = shutdown_event
+        
+        # ========== ML ADMISSION CONTROL ==========
+        # Only 1 in-flight ML request allowed at any time
+        self.ml_ready = threading.Event()
+        self.ml_ready.set()  # Initially ready
+        self.latest_frame = None  # Keep only latest frame
+        self.latest_frame_lock = threading.Lock()
+        
+        # ML worker thread
+        self.ml_worker_thread = None
+        self.ml_stop = threading.Event()
+        
+        # SAFE MODE state
+        self.in_safe_mode = False
+        self.safe_mode_reason = None
+        
+        # Last enhanced result for reuse
+        self.last_ml_result = None
+        
+    def _ml_worker(self):
+        """
+        BACKGROUND WORKER: Processes ML inference without blocking scheduler.
+        
+        KEY: Only 1 request in flight. Process latest frame, drop older.
+        """
+        print("[ML Worker] Background worker started (admission control enabled)")
+        
+        while not self.ml_stop.is_set():
+            # Wait until a frame is available
+            self.ml_ready.wait(timeout=1.0)
+            if self.ml_stop.is_set():
+                break
+            
+            # Grab latest frame (drop any older frames)
+            with self.latest_frame_lock:
+                if self.latest_frame is None:
+                    continue
+                frame, frame_id, timestamp = self.latest_frame
+                self.latest_frame = None
+            
+            try:
+                # EXECUTE ML INFERENCE
+                ml_start = time.time()
+                result = self.ml_module.run_inference(frame)
+                ml_duration = time.time() - ml_start
+                
+                # Metrics: Calculate ML FPS
+                ml_fps = 0.0
+                if hasattr(self, '_last_ml_time'):
+                    delta = time.time() - self._last_ml_time
+                    if delta > 0:
+                        ml_fps = 1.0 / delta
+                self._last_ml_time = time.time()
+                
+                # Store last result for reuse
+                self.last_ml_result = result.copy()
+                self.last_ml_result['frame_id'] = frame_id
+                self.last_ml_result['ml_latency_ms'] = ml_duration * 1000
+                self.last_ml_result['ml_fps'] = ml_fps
+                self.last_ml_result['completion_timestamp'] = time.time() # For cache age check
+                
+                # STABILIZATION: Worker does NOT emit directly.
+                # It just updates self.last_ml_result (stored above).
+                # The Scheduler Loop picks it up and emits at strict 12 FPS.
+                pass
+                
+                # RECOVERY CHECK
+                if self.in_safe_mode and ml_duration < 0.5:
+                    self.in_safe_mode = False
+                    self.safe_mode_reason = None
+                    print("[ML Worker] System recovered from safe mode")
+                    
+            except Exception as e:
+                print(f"[ML Worker] Error processing frame {frame_id}: {e}")
+                
+                # ENTER SAFE MODE
+                if not self.in_safe_mode:
+                    self.in_safe_mode = True
+                    self.safe_mode_reason = str(e)
+                    print(f"[Scheduler] ENTERING SAFE MODE: {e}")
+                    
+                    if self.result_callback:
+                        self.result_callback({
+                            "type": "system",
+                            "status": "safe_mode",
+                            "message": str(e),
+                            "payload": {"ml_available": False}
+                        })
+            
+            finally:
+                # SIGNAL: Ready for next frame
+                self.ml_ready.set()
+        
+        print("[ML Worker] Background worker stopped")
 
     def run(self):
         """
-        Runs the scheduler loop.
-        Reads frames from the video reader, emits raw frames, enforces FPS, and handles logical drops.
+        MAIN SCHEDULER LOOP (PACE-DRIVEN)
+        
+        Contract: 
+        1. ALWAYS emit raw frames immediately
+        2. Sleep for frame_interval between frames (pace-driven)
+        3. Submit to ML only if ready (admission control)
+        4. NEVER calculate drift or compare timestamps
         """
-        print(f"[Scheduler] Starting at Target FPS={self.target_fps}, Interval={self.frame_interval:.4f}s")
+        print(f"[Scheduler] PHASE-3 CORE v2: Target FPS={self.target_fps}, Interval={self.frame_interval:.4f}s")
+        print("[Scheduler] Mode: PACE-DRIVEN (no drift accumulation)")
+        
+        # Start background worker if ML module present
         if self.ml_module:
-            print("[Scheduler] ML Module detected. Using synchronous inference.")
+            self.ml_worker_thread = threading.Thread(target=self._ml_worker, daemon=True)
+            self.ml_worker_thread.start()
+            print("[Scheduler] ML worker started (1 in-flight max)")
         
-        # SAFE MODE State
-        self.in_safe_mode = False
-        self.safe_mode_reason = None
-        self.last_recovery_check = 0.0
-        self.recovery_interval = 5.0 # Seconds
+        frame_count = 0
+        last_fps_log = time.time()
+        last_frame_time = time.time()
         
-        start_time = time.time()
-        frames_processed_in_window = 0
-        last_fps_log_time = start_time
-        current_fps = 0.0 # Store for payload
-
-        # We iterate through all frames from the source
         try:
-            # New contract: frame, frame_id, timestamp
-            for frame, frame_id, timestamp in self.video_source.read():
-                
-                # Adjust start time reference if this is the first frame we see
-                if frame_id == 0:
-                    start_time = timestamp # Align scheduler clock with video timestamp
+            for frame, frame_id, source_timestamp in self.video_source.read():
+                # Check shutdown
+                if self.shutdown_event and self.shutdown_event.is_set():
+                    print("[Scheduler] Shutdown signal received")
+                    break
                 
                 current_time = time.time()
-                # We use the provided timestamp if we want strictly video-time, 
-                # but for real-time simulation, we check wall-clock drift against expected frame count.
                 
-                # Expected time since start
-                expected_time = frame_id * self.frame_interval
-                actual_elapsed = current_time - start_time
-                
-                # Drift check
-                drift = actual_elapsed - expected_time
-                
-                # ALWAYS EMIT RAW FRAME (Decoupled from ML)
+                # ========== STEP 1: EMIT RAW FRAME IMMEDIATELY ==========
                 if self.raw_callback:
-                    # Non-blocking emission (presumed, depending on callback impl)
-                    self.raw_callback(frame, frame_id, timestamp)
-
-                if drift > self.frame_interval:
-                    # We are behind by more than one frame. Drop this frame from ML processing.
-                    print(f"[Scheduler] Frame {frame_id}: Status=DROPPED_FROM_ML (Drift={drift:.4f}s)")
-                    continue # Skip ML
-                else:
-                    # Process the frame
-                    # print(f"[Scheduler] Frame {frame_id}: Status=PROCESSED") # Reduce log spam
-                    
-                    # SAFE MODE CHECK / RECOVERY
-                    should_run_ml = False
-                    
-                    if self.in_safe_mode:
-                        # Periodically check for recovery
-                        if current_time - self.last_recovery_check >= self.recovery_interval:
-                            print("[Scheduler] Safe Mode: Attempting recovery check...")
-                            should_run_ml = True # Try one inference
-                            self.last_recovery_check = current_time
-                        else:
-                            # Skip ML, send Safe Mode status
-                            if self.result_callback:
-                                self.result_callback({
-                                    "type": "system",
-                                    "status": "safe_mode",
-                                    "message": f"System in Safe Mode: {self.safe_mode_reason}",
-                                    "payload": None
-                                })
+                    self.raw_callback(frame, frame_id, current_time)
+                
+                # ========== STEP 2: SUBMIT TO ML (ADMISSION CONTROL) ==========
+                if self.ml_module:
+                    # A. Submitting new frames to ML Worker
+                    if self.ml_ready.is_set():
+                        # ML is ready, submit this frame
+                        with self.latest_frame_lock:
+                            self.latest_frame = (frame, frame_id, current_time)
+                        self.ml_ready.clear()  # Mark ML as busy
                     else:
-                        should_run_ml = True # Normal operation
+                        # ML busy, update latest frame (drop older)
+                        with self.latest_frame_lock:
+                            self.latest_frame = (frame, frame_id, current_time)
 
-                    # ML PROCESSING
-                    if self.ml_module and should_run_ml:
+                    # B. SCHEDULER-PACED EMISSION (Force 12 FPS output)
+                    # Emit enhanced frame EVERY scheduler tick using best available data
+                    # FIX: Always emit - removed MAX_CACHE_AGE gating that was dropping 90% of frames
+                    # image_data is already encoded in last_ml_result (no re-encoding)
+                    if self.result_callback and self.last_ml_result:
                         try:
-                            # Blocking call to ML with timeout measurement
-                            # print(f"[Scheduler] Frame {frame_id}: Sending to ML...")
-                            
-                            ml_start = time.time()
-                            result = self.ml_module.run_inference(frame)
-                            ml_end = time.time()
-                            ml_duration = ml_end - ml_start
-                            
-                            # print(f"[Scheduler] Frame {frame_id}: ML Result Received. Duration={ml_duration:.4f}s")
-                            
-                            # CHECK FOR SLOW INFERENCE
-                            if ml_duration > 0.2:
-                                # We don't crash, just warn/safe mode if needed? 
-                                # For now, let's just log. Strict requirement says "Support frame dropping under latency"
-                                # We already drop frames if we drift.
-                                pass
-                            
-                            # If we were in safe mode and succeeded quickly, recover
-                            if self.in_safe_mode:
-                                print(f"[Scheduler] Recovery Successful! (Duration: {ml_duration:.4f}s)")
-                                self.in_safe_mode = False
-                                self.safe_mode_reason = None
-                                if self.result_callback:
-                                    self.result_callback({
-                                        "type": "system",
-                                        "status": "recovered",
-                                        "message": "System recovered",
-                                        "payload": None
-                                    })
+                            # Rebuild payload with FRESH timestamps, reuse cached image
+                            enhanced_payload = {
+                                "frame_id": frame_id,
+                                "timestamp": current_time,
+                                # Reuse cached image/detections from last ML result
+                                "detections": self.last_ml_result.get("detections", []),
+                                "max_confidence": self.last_ml_result.get("max_confidence", 0.0),
+                                "state": self.last_ml_result.get("state", "NORMAL"),
+                                # image_data is already base64 encoded - no re-encoding needed
+                                "image_data": self.last_ml_result.get("image_data"),
+                                # Re-attach system metrics
+                                "system": {
+                                    "fps": self.target_fps,
+                                    "latency_ms": self.last_ml_result.get("ml_latency_ms", 0.0),
+                                    "ml_fps": self.last_ml_result.get("ml_fps", 0.0),
+                                    "ml_available": True
+                                },
+                                "is_cached": not self.ml_ready.is_set()
+                            }
 
-                            # CALLBACK FOR WEBSOCKET (Normal Data)
-                            if self.result_callback:
-                                payload = result.copy()
-                                payload['frame_id'] = frame_id
-                                payload['system'] = {
-                                    "fps": current_fps,
-                                    "latency_ms": ml_duration * 1000
-                                }
-                                # Normal data format
-                                self.result_callback({
-                                    "type": "data",
-                                    "status": "success",
-                                    "message": "New frame data",
-                                    "payload": payload
-                                })
-
+                            self.result_callback({
+                                "type": "data",
+                                "status": "success",
+                                "message": "Enhanced frame (paced)",
+                                "payload": enhanced_payload
+                            })
                         except Exception as e:
-                            print(f"[Scheduler] Frame {frame_id}: ML Error: {e}")
-                            
-                            # ENTER SAFE MODE
-                            if not self.in_safe_mode:
-                                self.in_safe_mode = True
-                                self.safe_mode_reason = str(e)
-                                self.last_recovery_check = time.time() # Start timer
-                                print(f"[Scheduler] !!! ENTERING SAFE MODE !!! Reason: {e}")
-                                
-                                if self.result_callback:
-                                    self.result_callback({
-                                        "type": "system",
-                                        "status": "safe_mode",
-                                        "message": str(e),
-                                        "payload": None
-                                    })
-                                    
-                    elif self.simulate_processing_delay > 0:
-                        # Fallback simulation if no ML module
-                        time.sleep(self.simulate_processing_delay)
-                    
-                    frames_processed_in_window += 1
-                    
-                    # Check if we processed too fast, need to sleep to maintain FPS
-                    # But if we slept for ML, we probably don't need to sleep more.
-                    # Re-calculate drift to sleep only if we are AHEAD.
-                    post_process_time = time.time()
-                    post_elapsed = post_process_time - start_time
-                    next_frame_expected_time = (frame_id + 1) * self.frame_interval
-                    
-                    sleep_duration = next_frame_expected_time - post_elapsed
-                    if sleep_duration > 0:
-                        time.sleep(sleep_duration)
-
-                # FPS Calculation (every 1 second)
+                            print(f"[Scheduler] Error sending paced frame: {e}")
+                
+                # ========== STEP 3: PACE-DRIVEN SLEEP ==========
+                frame_count += 1
+                
+                # Calculate sleep based on LAST frame time, not absolute
+                elapsed_since_last = current_time - last_frame_time
+                sleep_duration = self.frame_interval - elapsed_since_last
+                
+                if sleep_duration > 0:
+                    time.sleep(sleep_duration)
+                
+                last_frame_time = time.time()
+                
+                # ========== STEP 4: LOG FPS (every second) ==========
                 now = time.time()
-                if now - last_fps_log_time >= 1.0:
-                    current_fps = frames_processed_in_window # Update for payload
-                    print(f"[Scheduler] actual_fps={frames_processed_in_window}, drift={drift:.3f}s")
-                    frames_processed_in_window = 0
-                    last_fps_log_time = now
+                if now - last_fps_log >= 1.0:
+                    print(f"[Scheduler] FPS={frame_count}, Mode={'GPU' if self.ml_module else 'SAFE'}")
+                    frame_count = 0
+                    last_fps_log = now
         
         except Exception as e:
-            # Catch unexpected Video loop errors
-             print(f"[Scheduler] CRITICAL LOOP ERROR: {e}")
-             import traceback
-             traceback.print_exc()
-             pass
+            print(f"[Scheduler] CRITICAL ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Cleanup
+        self.ml_stop.set()
+        if self.shutdown_event:
+            self.shutdown_event.set()
+        
+        if self.ml_worker_thread:
+            self.ml_worker_thread.join(timeout=2.0)
+            print("[Scheduler] Graceful shutdown complete")
+
 
 if __name__ == "__main__":
-    # Test Block
     from app.video.video_reader import RawVideoSource
-    import sys
     
-    print(f"Testing Scheduler...")
+    print("Testing PHASE-3 CORE Scheduler v2...")
     source = RawVideoSource()
-    scheduler = FrameScheduler(source, target_fps=15) 
+    scheduler = FrameScheduler(source, target_fps=12) 
     scheduler.run()

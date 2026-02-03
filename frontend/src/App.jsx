@@ -90,7 +90,7 @@ function App() {
   const [lastAlertSnapshot, setLastAlertSnapshot] = useState(null);
 
   // Only use live stream when not in fake/test mode
-  const liveStreamData = useLiveStream(USE_FAKE_STREAM ? null : token);
+  const liveStreamData = useLiveStream(!USE_FAKE_STREAM);
 
   // Destructure with defaults for when hook returns null/disconnected state
   const {

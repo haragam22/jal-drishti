@@ -1,0 +1,75 @@
+# ============================================
+# JAL-DRISHTI PHASE-3 CORE CONFIGURATION
+# ============================================
+# This file controls system-wide parameters
+# All values can be modified without code changes
+
+# GPU / Device Configuration
+device:
+  use_gpu: true                    # Enable CUDA if available
+  gpu_fallback_to_cpu: true       # If GPU fails, fallback to CPU
+  fp16_enabled: true               # Use half-precision (FP16) inference on GPU
+  
+# Performance & Real-Time Configuration  
+performance:
+  target_fps: 12                   # PHASE-3 CORE: Stable 8-12 FPS (not 15)
+  max_fps: 15                      # Hard limit on FPS
+  latency_target_ms: 80            # Target end-to-end latency in milliseconds
+  frame_drop_on_ml_busy: true      # Drop frames if ML worker is busy (CRITICAL)
+  
+# ML Service Configuration
+ml_service:
+  debug_mode: false                # DISABLED: Send enhanced images only on anomaly (reduces 20-40KB overhead per frame)
+  send_enhanced_on_anomaly: true   # Send image only when state != SAFE_MODE (CRITICAL for latency)
+  
+# Video Source Configuration
+video:
+  source_type: "file"              # Options: "file", "webcam", "rtsp"
+  file_path: "backend/dummy.mp4"   # Video file path (if source_type = "file")
+  webcam_id: 0                     # Webcam device ID (if source_type = "webcam")
+  rtsp_url: ""                     # RTSP URL (if source_type = "rtsp")
+  fallback_to_simulation: true     # If live source fails, use simulation
+  
+# Confidence & Detection Thresholds
+confidence:
+  yolo_detection_threshold: 0.40   # Minimum confidence to report detection
+  safe_mode_threshold: 0.30        # Below this = SAFE_MODE
+  potential_anomaly_threshold: 0.30 # Between this and confirmed = POTENTIAL_ANOMALY
+  confirmed_threat_threshold: 0.70 # Above this = CONFIRMED_THREAT
+  
+# Confidence Smoothing (Temporal Stability)
+smoothing:
+  enabled: true                    # Enable moving average smoothing
+  window_size: 3                   # Number of frames for moving average
+  state_persistence_frames: 2      # Frames required to change state
+  
+# Anomaly Event Logging
+event_logging:
+  enabled: true                    # Enable anomaly event capture
+  log_non_safe_mode: true          # Log when state != SAFE_MODE
+  max_events_in_memory: 15         # Keep latest N events (older ones discarded)
+  
+# Backend Configuration
+backend:
+  host: "127.0.0.1"
+  port: 9000
+  ws_broadcast_interval_ms: 83     # ~12 FPS for UI updates (matches target FPS)
+  
+# ML Engine Configuration
+ml_engine:
+  gan_model_path: "ml-engine/weights/funie_generator.pth"
+  yolo_model_path: "ml-engine/weights/yolov8n.pt"
+  inference_timeout_ms: 100        # Timeout for inference (graceful failure)
+  
+# Logging & Debug
+logging:
+  level: "INFO"                    # Options: DEBUG, INFO, WARNING, ERROR
+  log_frame_drops: true            # Log when frames are dropped
+  log_device_info: true            # Log GPU/CPU device at startup
+  log_latency: true                # Log per-frame latency
+  
+# Feature Flags
+features:
+  live_video_support: true         # Enable live video sources
+  error_recovery: true             # Enable graceful error recovery
+  architecture_frozen: false       # Set to true after freeze (prevents changes)

@@ -1,5 +1,4 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
-from app.services.ml_service import ml_service
 from app.schemas.response import AIResponse
 from app.core.security import verify_token
 import logging
@@ -27,20 +26,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             # Receive binary frame (bytes)
             # We use receive_bytes to accept raw image data
             data = await websocket.receive_bytes()
-            
-            # Process frame (Dummy ML)
+
+            # Retrieve the ML service instance from the app state
+            ml_service = getattr(websocket.app.state, 'ml_service', None)
+            if ml_service is None:
+                logger.error("ML service not available on app.state")
+                await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                return
+
+            # Process frame via the ML service
             result = ml_service.process_frame(data)
-            
+
             # Validate against schema (optional, but good for safety)
             response = AIResponse(**result)
-            
+
             # Send JSON response
             await websocket.send_json(response.model_dump())
-            
+
     except WebSocketDisconnect:
         logger.info(f"Client '{user}' disconnected")
     except Exception as e:
-        logger.error(f"Error in stream: {e}")
+        # Suppress noisy errors during shutdown or normal closes
+        error_msg = str(e).lower()
+        if "close message has been sent" in error_msg or "connection closed" in error_msg:
+            pass  # Normal close, don't log
+        else:
+            logger.error(f"Error in stream: {type(e).__name__}: {e}")
         try:
             await websocket.close()
         except:

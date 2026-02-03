@@ -11,12 +11,14 @@ import {
 /**
  * useLiveStream Hook
  * 
- * Enhanced to handle both data and system messages from backend.
- * System messages include: safe_mode, recovered, connected
- * 
- * IMPORTANT: Does NOT modify WebSocket protocol - only interprets existing messages.
+ * PHASE-3 OPTIMIZED:
+ * - Frontend is PASSIVE subscriber
+ * - Backend drives timing, not frontend
+ * - Keep last valid frame on disconnect
+ * - No pings to backend
+ * - requestAnimationFrame decoupling: WS receive rate != render rate
  */
-const useLiveStream = (token) => {
+const useLiveStream = (enabled = true) => {
     const [frame, setFrame] = useState(null);
     const [fps, setFps] = useState(0);
     const [connectionStatus, setConnectionStatus] = useState(CONNECTION_STATES.DISCONNECTED);
@@ -36,12 +38,17 @@ const useLiveStream = (token) => {
     const wsRef = useRef(null);
     const frameCountRef = useRef(0);
     const fpsIntervalRef = useRef(null);
-    const streamIntervalRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
     const lastValidFrameRef = useRef(null);
     const lastFrameIdRef = useRef(-1);
     const connectRef = useRef(null);
 
+    // ========== requestAnimationFrame DECOUPLING ==========
+    // Store latest frame in ref (fast, no re-render)
+    // Only render via requestAnimationFrame (smooth, 60fps max)
+    const latestFrameRef = useRef(null);
+    const rafIdRef = useRef(null);
+    const isRenderingRef = useRef(false);
     /**
      * Add event to timeline
      */
@@ -73,14 +80,32 @@ const useLiveStream = (token) => {
             wsRef.current.close();
             wsRef.current = null;
         }
-        if (streamIntervalRef.current) {
-            clearInterval(streamIntervalRef.current);
-            streamIntervalRef.current = null;
-        }
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
             reconnectTimeoutRef.current = null;
         }
+        if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+        }
+    }, []);
+
+    // ========== RENDER LOOP (Decoupled from WS) ==========
+    // This runs at display refresh rate (~60fps) but only updates state
+    // when there's a new frame in latestFrameRef
+    const renderLoop = useCallback(() => {
+        if (latestFrameRef.current && !isRenderingRef.current) {
+            isRenderingRef.current = true;
+            const frameToRender = latestFrameRef.current;
+            latestFrameRef.current = null; // Clear buffer
+
+            setFrame(frameToRender);
+            lastValidFrameRef.current = frameToRender;
+            frameCountRef.current += 1;
+
+            isRenderingRef.current = false;
+        }
+        rafIdRef.current = requestAnimationFrame(renderLoop);
     }, []);
 
     /**
@@ -126,10 +151,10 @@ const useLiveStream = (token) => {
 
     // Connect to WebSocket function
     const connect = useCallback(() => {
-        if (!token) return;
+        if (!enabled) return;
 
         try {
-            const ws = new WebSocket(`${WS_CONFIG.URL}?token=${token}`);
+            const ws = new WebSocket(WS_CONFIG.URL);
             wsRef.current = ws;
 
             ws.onopen = () => {
@@ -137,17 +162,17 @@ const useLiveStream = (token) => {
                 setConnectionStatus(CONNECTION_STATES.CONNECTED);
                 setReconnectAttempt(0);
 
-                // Start sending frames to drive the backend loop
-                streamIntervalRef.current = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(new Uint8Array([0]));
-                    }
-                }, WS_CONFIG.FRAME_INTERVAL_MS);
+                // Start render loop on connect
+                if (!rafIdRef.current) {
+                    rafIdRef.current = requestAnimationFrame(renderLoop);
+                }
             };
 
             ws.onmessage = (event) => {
                 try {
                     const response = JSON.parse(event.data);
+
+                   
 
                     // ==========================================
                     // SYSTEM MESSAGE HANDLING
@@ -192,9 +217,9 @@ const useLiveStream = (token) => {
                         }
                     };
 
-                    setFrame(normalizedFrame);
-                    lastValidFrameRef.current = normalizedFrame;
-                    frameCountRef.current += 1;
+                    // DECOUPLING: Store in ref, don't call setFrame directly
+                    // Render loop will pick it up on next animation frame
+                    latestFrameRef.current = normalizedFrame;
 
                 } catch (err) {
                     console.error('[WS] Error parsing response:', err);
