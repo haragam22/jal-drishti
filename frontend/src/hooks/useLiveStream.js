@@ -3,7 +3,9 @@ import {
     SYSTEM_STATES,
     CONNECTION_STATES,
     RECONNECT_CONFIG,
-    WS_CONFIG
+    WS_CONFIG,
+    SYSTEM_STATUS,
+    EVENT_TYPES
 } from '../constants';
 
 /**
@@ -22,6 +24,16 @@ const useLiveStream = (enabled = true) => {
     const [connectionStatus, setConnectionStatus] = useState(CONNECTION_STATES.DISCONNECTED);
     const [reconnectAttempt, setReconnectAttempt] = useState(0);
 
+    // System status state for safe mode overlay
+    const [systemStatus, setSystemStatus] = useState({
+        inSafeMode: false,
+        message: null,
+        cause: null
+    });
+
+    // Event log for timeline
+    const [events, setEvents] = useState([]);
+
     // Refs for logic that shouldn't trigger re-renders
     const wsRef = useRef(null);
     const frameCountRef = useRef(0);
@@ -37,6 +49,24 @@ const useLiveStream = (enabled = true) => {
     const latestFrameRef = useRef(null);
     const rafIdRef = useRef(null);
     const isRenderingRef = useRef(false);
+    /**
+     * Add event to timeline
+     */
+    const addEvent = useCallback((type, message, severity = 'info') => {
+        const newEvent = {
+            id: Date.now(),
+            timestamp: new Date().toLocaleTimeString('en-US', {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            }),
+            type,
+            message,
+            severity // 'info', 'warning', 'danger', 'success'
+        };
+        setEvents(prev => [newEvent, ...prev].slice(0, 50)); // Keep last 50 events
+    }, []);
 
     const getReconnectDelay = useCallback((attempt) => {
         return Math.min(
@@ -78,6 +108,47 @@ const useLiveStream = (enabled = true) => {
         rafIdRef.current = requestAnimationFrame(renderLoop);
     }, []);
 
+    /**
+     * Handle system messages from backend
+     * Message types: safe_mode, recovered, connected
+     */
+    const handleSystemMessage = useCallback((message) => {
+        const { status, message: msg } = message;
+
+        switch (status) {
+            case SYSTEM_STATUS.SAFE_MODE:
+                // Backend signaling safe mode entry
+                setSystemStatus({
+                    inSafeMode: true,
+                    message: msg || 'System entered safe mode',
+                    cause: message.cause || message.payload?.cause || 'Unknown cause'
+                });
+                addEvent(EVENT_TYPES.SAFE_MODE_ENTRY, msg || 'SAFE MODE Activated', 'danger');
+                console.log('[WS] System entered SAFE MODE:', msg);
+                break;
+
+            case SYSTEM_STATUS.RECOVERED:
+                // Backend signaling recovery from safe mode
+                setSystemStatus({
+                    inSafeMode: false,
+                    message: null,
+                    cause: null
+                });
+                addEvent(EVENT_TYPES.SAFE_MODE_EXIT, 'System Recovered', 'success');
+                console.log('[WS] System RECOVERED from safe mode');
+                break;
+
+            case SYSTEM_STATUS.CONNECTED:
+                // Initial connection confirmation
+                addEvent(EVENT_TYPES.CONNECTION, 'WebSocket Connected', 'success');
+                console.log('[WS] Connection confirmed by backend');
+                break;
+
+            default:
+                console.log('[WS] Unknown system status:', status);
+        }
+    }, [addEvent]);
+
     // Connect to WebSocket function
     const connect = useCallback(() => {
         if (!enabled) return;
@@ -101,34 +172,48 @@ const useLiveStream = (enabled = true) => {
                 try {
                     const response = JSON.parse(event.data);
 
-                    // Skip system messages
+                   
+
+                    // ==========================================
+                    // SYSTEM MESSAGE HANDLING
+                    // Handle type: "system" messages separately
+                    // ==========================================
                     if (response.type === 'system') {
+                        handleSystemMessage(response);
                         return;
                     }
+
+                    // ==========================================
+                    // DATA MESSAGE HANDLING
+                    // Handle type: "data" messages (normal ML output)
+                    // ==========================================
+
+                    // For data messages, extract payload if wrapped
+                    const data = response.payload || response;
 
                     // Out-of-order detection: ignore stale frames
-                    if (response.frame_id !== undefined && response.frame_id <= lastFrameIdRef.current) {
+                    if (data.frame_id !== undefined && data.frame_id <= lastFrameIdRef.current) {
                         return;
                     }
-                    lastFrameIdRef.current = response.frame_id || lastFrameIdRef.current;
+                    lastFrameIdRef.current = data.frame_id || lastFrameIdRef.current;
 
-                    // Normalize image_data to a proper data URL
-                    let imageData = response.image_data || null;
+                    // Normalize image_data to a proper data URL if it's a base64 string
+                    let imageData = data.image_data || null;
                     if (imageData && typeof imageData === 'string' && !imageData.startsWith('data:')) {
                         imageData = `data:image/jpeg;base64,${imageData}`;
                     }
 
                     const normalizedFrame = {
-                        timestamp: response.timestamp || new Date().toISOString(),
-                        state: response.state || SYSTEM_STATES.SAFE_MODE,
-                        max_confidence: response.max_confidence ?? 0,
-                        detections: response.detections || [],
-                        visibility_score: response.visibility_score ?? 0,
+                        timestamp: data.timestamp || new Date().toISOString(),
+                        state: data.state || SYSTEM_STATES.SAFE_MODE,
+                        max_confidence: data.max_confidence ?? 0,
+                        detections: data.detections || [],
+                        visibility_score: data.visibility_score ?? 0,
                         image_data: imageData,
-                        frame_id: response.frame_id,
+                        frame_id: data.frame_id,
                         system: {
-                            fps: response.system?.fps ?? null,
-                            latency_ms: response.system?.latency_ms ?? null
+                            fps: data.system?.fps ?? null,
+                            latency_ms: data.system?.latency_ms ?? null
                         }
                     };
 
@@ -143,10 +228,12 @@ const useLiveStream = (enabled = true) => {
 
             ws.onclose = (event) => {
                 console.log('[WS] Connection closed:', event.code);
+                addEvent(EVENT_TYPES.DISCONNECTION, `Connection closed (code: ${event.code})`, 'warning');
 
-                // STABILIZATION FIX (Issue 6):
-                // DO NOT clear frame on disconnect - keep last valid frame visible
-                // Visual continuity > frame accuracy
+                if (streamIntervalRef.current) {
+                    clearInterval(streamIntervalRef.current);
+                    streamIntervalRef.current = null;
+                }
 
                 // Attempt reconnection if not at max attempts
                 setReconnectAttempt((prev) => {
@@ -180,7 +267,7 @@ const useLiveStream = (enabled = true) => {
             console.error('[WS] Failed to create WebSocket:', err);
             setConnectionStatus(CONNECTION_STATES.FAILED);
         }
-    }, [enabled, getReconnectDelay, renderLoop]);
+    }, [token, getReconnectDelay, handleSystemMessage, addEvent]);
 
     // Keep the ref updated for timeout callbacks
     useEffect(() => {
@@ -193,8 +280,9 @@ const useLiveStream = (enabled = true) => {
         console.log('[WS] Manual reconnect triggered');
         setReconnectAttempt(0);
         lastFrameIdRef.current = -1;
+        addEvent(EVENT_TYPES.CONNECTION, 'Manual reconnect initiated', 'info');
         connect();
-    }, [connect]);
+    }, [connect, addEvent]);
 
     // Initialize connection and FPS counter
     useEffect(() => {
@@ -220,7 +308,11 @@ const useLiveStream = (enabled = true) => {
         connectionStatus,
         reconnectAttempt,
         lastValidFrame: lastValidFrameRef.current,
-        manualReconnect
+        manualReconnect,
+        // New exports for UI enhancement
+        systemStatus,
+        events,
+        addEvent
     };
 };
 
