@@ -34,6 +34,9 @@ const useLiveStream = (enabled = true) => {
     // Event log for timeline
     const [events, setEvents] = useState([]);
 
+    // PHASE-3 FIX: Track if viewer is blocked (prevents reconnect storm)
+    const [viewerBlocked, setViewerBlocked] = useState(false);
+
     // Refs for logic that shouldn't trigger re-renders
     const wsRef = useRef(null);
     const frameCountRef = useRef(0);
@@ -144,6 +147,19 @@ const useLiveStream = (enabled = true) => {
                 console.log('[WS] Connection confirmed by backend');
                 break;
 
+            // PHASE-3 FIX: Handle viewer blocked/allowed status
+            case 'viewer_blocked':
+                setViewerBlocked(true);
+                addEvent(EVENT_TYPES.CONNECTION, 'View disabled by operator', 'warning');
+                console.log('[WS] Viewer blocked by operator - NOT reconnecting');
+                break;
+
+            case 'viewer_allowed':
+                setViewerBlocked(false);
+                addEvent(EVENT_TYPES.CONNECTION, 'View enabled by operator', 'success');
+                console.log('[WS] Viewer allowed by operator');
+                break;
+
             default:
                 console.log('[WS] Unknown system status:', status);
         }
@@ -159,6 +175,21 @@ const useLiveStream = (enabled = true) => {
 
             ws.onopen = () => {
                 console.log('[WS] Connected to AI Backend');
+
+                // PHASE-3: Send viewer_id for multi-viewer streaming
+                // Generate or retrieve viewer_id from localStorage
+                let viewerId = localStorage.getItem('jalDrishtiViewerId');
+                if (!viewerId) {
+                    viewerId = 'viewer-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                    localStorage.setItem('jalDrishtiViewerId', viewerId);
+                }
+
+                // Send registration message
+                ws.send(JSON.stringify({
+                    viewer_id: viewerId,
+                    label: navigator.userAgent.includes('Mobile') ? 'Mobile Device' : 'Desktop Browser'
+                }));
+
                 setConnectionStatus(CONNECTION_STATES.CONNECTED);
                 setReconnectAttempt(0);
 
@@ -167,6 +198,7 @@ const useLiveStream = (enabled = true) => {
                     rafIdRef.current = requestAnimationFrame(renderLoop);
                 }
             };
+
 
             ws.onmessage = (event) => {
                 try {
@@ -312,7 +344,9 @@ const useLiveStream = (enabled = true) => {
         // New exports for UI enhancement
         systemStatus,
         events,
-        addEvent
+        addEvent,
+        // PHASE-3 FIX: Viewer blocked state
+        viewerBlocked
     };
 };
 

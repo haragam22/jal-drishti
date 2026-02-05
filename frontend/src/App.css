@@ -519,6 +519,259 @@ body {
   opacity: 0.7;
 }
 
+/* Phase-3: Additional source toggle status variants */
+.status-waiting {
+  background: rgba(249, 115, 22, 0.15);
+  color: var(--accent-amber);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  animation: pulse 1.5s infinite;
+}
+
+.status-idle {
+  background: rgba(107, 114, 128, 0.1);
+  color: var(--text-muted);
+  border: 1px solid rgba(107, 114, 128, 0.2);
+}
+
+.status-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--accent-red);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Phase-3: Camera URL box */
+.camera-url-box {
+  background: var(--bg-dark);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.url-label {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.camera-url {
+  font-size: 0.65rem;
+  color: var(--accent-cyan);
+  text-decoration: none;
+  word-break: break-all;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.camera-url:hover {
+  color: var(--accent-green);
+  text-decoration: underline;
+}
+
+.url-hint {
+  font-size: 0.55rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Phase-3: Toggle error message */
+.toggle-error {
+  font-size: 0.65rem;
+  color: var(--accent-red);
+  background: rgba(239, 68, 68, 0.1);
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* Phase-3: State badge in footer */
+.state-badge {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.state-badge.active {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--accent-green);
+}
+
+.state-badge.idle {
+  background: rgba(107, 114, 128, 0.1);
+  color: var(--text-muted);
+}
+
+.source-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ================================================
+   CONNECTED VIEWERS PANEL (Phase-3)
+   ================================================ */
+.connected-viewers-container {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.viewers-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-dark);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.viewers-icon {
+  font-size: 1rem;
+}
+
+.viewers-title {
+  flex: 1;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+}
+
+.viewers-count {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent-cyan);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.expand-arrow {
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.expand-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+.viewers-content {
+  padding: 10px;
+}
+
+.viewers-empty {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 12px;
+  font-style: italic;
+}
+
+.viewers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.viewer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-dark);
+  border-radius: 6px;
+  border-left: 2px solid var(--border-primary);
+}
+
+.viewer-item.allowed {
+  border-left-color: var(--accent-green);
+}
+
+.viewer-item.blocked {
+  border-left-color: var(--accent-red);
+  opacity: 0.6;
+}
+
+.viewer-status-icon {
+  font-size: 0.8rem;
+}
+
+.viewer-label {
+  flex: 1;
+  font-size: 0.7rem;
+  color: var(--text-primary);
+}
+
+.viewer-toggle-btn {
+  font-size: 0.55rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.viewer-toggle-btn.block {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--accent-red);
+}
+
+.viewer-toggle-btn.allow {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--accent-green);
+}
+
+.viewer-toggle-btn:hover {
+  opacity: 0.8;
+}
+
+.viewer-toggle-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.viewers-stats {
+  display: flex;
+  justify-content: space-around;
+  padding-top: 10px;
+  margin-top: 10px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.stat-label {
+  font-size: 0.55rem;
+  color: var(--text-muted);
+}
+
+.stat-value {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.stat-value.allowed {
+  color: var(--accent-green);
+}
+
+.stat-value.blocked {
+  color: var(--accent-red);
+}
+
 /* ================================================
    EVENT TIMELINE PANEL
    ================================================ */
