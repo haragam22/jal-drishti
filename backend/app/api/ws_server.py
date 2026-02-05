@@ -1,18 +1,14 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import json
 import asyncio
-from typing import Set
+from typing import Set, Dict
 
 router = APIRouter()
 
-# STABILIZATION FIX: Allow MULTIPLE concurrent clients (Issue 1 & 4)
-# Different WS endpoints are NOT same client - allow many subscribers
-active_connections: Set[WebSocket] = set()
+# PHASE-3: Viewer-aware connections
+# Map: viewer_id -> WebSocket
+active_connections: Dict[str, WebSocket] = {}
 _event_loop = None
-
-# Enhanced image control - don't send every frame
-_last_enhanced_frame_id = -1
-ENHANCED_IMAGE_INTERVAL = 6  # Send image every Nth ML result
 
 
 def set_event_loop(loop):
@@ -23,55 +19,80 @@ def set_event_loop(loop):
 @router.websocket("/stream")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    STABILIZATION FIX: Multiple WebSocket clients allowed.
+    PHASE-3 CORE: Viewer-aware WebSocket endpoint.
     
-    FIX FOR Issues 1 & 4:
-    - DO NOT kick existing clients
-    - Allow multiple concurrent subscribers
-    - Backend is producer, frontend is passive subscriber
+    Client must send viewer_id on connect.
+    Only allowed viewers receive frames (others stay connected but get no data).
     """
-    global active_connections
+    from app.services.viewer_manager import viewer_manager
     
     await websocket.accept()
-    active_connections.add(websocket)
-    print(f"[WS] Client connected. Total: {len(active_connections)}")
     
-    # Send connection success message
+    # Wait for viewer_id from client
+    viewer_id = None
+    try:
+        # Expect first message to be viewer registration
+        init_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+        viewer_id = init_msg.get("viewer_id")
+        label = init_msg.get("label", "Unknown Device")
+        
+        if not viewer_id:
+            # Generate one if client didn't provide
+            import uuid
+            viewer_id = str(uuid.uuid4())
+            
+    except asyncio.TimeoutError:
+        # No viewer_id sent, generate one
+        import uuid
+        viewer_id = str(uuid.uuid4())
+        label = "Unknown Device"
+    except Exception as e:
+        print(f"[WS] Error getting viewer_id: {e}")
+        import uuid
+        viewer_id = str(uuid.uuid4())
+        label = "Unknown Device"
+    
+    # Register viewer
+    active_connections[viewer_id] = websocket
+    viewer_manager.register_viewer(viewer_id, websocket, label)
+    print(f"[WS] Viewer connected: {viewer_id[:8]}... Total: {len(active_connections)}")
+    
+    # Send connection success with assigned viewer_id
     await websocket.send_json({
         "type": "system",
         "status": "connected",
         "message": "WebSocket connection established",
-        "payload": None
+        "viewer_id": viewer_id,
+        "allowed": viewer_manager.is_allowed(viewer_id)
     })
     
     try:
         while True:
-            # Passive subscriber: just keep connection alive
-            # FIX Issue 2: Ignore any client messages - backend drives timing
+            # Passive subscriber: keep connection alive
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
-            # Ignore all other messages - frontend should NOT drive backend
+            # Ignore other messages
             
     except WebSocketDisconnect:
         pass
     except Exception as e:
         print(f"[WS] Error: {e}")
     finally:
-        active_connections.discard(websocket)
-        print(f"[WS] Client disconnected. Total: {len(active_connections)}")
+        active_connections.pop(viewer_id, None)
+        viewer_manager.unregister_viewer(viewer_id)
+        print(f"[WS] Viewer disconnected: {viewer_id[:8]}... Total: {len(active_connections)}")
 
 
 def broadcast(message: dict):
     """
-    Send ML result to ALL active WebSocket connections.
+    PHASE-3: Send ML result to ALLOWED viewers only.
     
-    STABILIZATION FIX:
-    - Send to all clients (not just one)
-    - Non-blocking sends with timeout
-    - Drop slow clients silently
+    Blocked viewers stay connected but receive no frames.
     """
-    global active_connections, _event_loop, _last_enhanced_frame_id
+    from app.services.viewer_manager import viewer_manager
+    
+    global active_connections, _event_loop
     
     if not active_connections:
         return
@@ -82,26 +103,23 @@ def broadcast(message: dict):
         except:
             return
 
-    # Check if we should include enhanced image
-    # STABILIZATION FIX: Never strip image data (Fix #1)
-    # The frontend expects a continuous feed. Removing image_data causes "No Signal" flicker.
-    # While this increases bandwidth, it is necessary for visual stability until frontend has interpolation.
-    should_send_image = True 
-    # _last_enhanced_frame_id update removed to prevent NameError
-    
     send_message = message.copy()
 
     async def _send():
         if not active_connections:
             return
         
-        # Send to ALL clients (copy to avoid modification during iteration)
-        for connection in list(active_connections):
+        # Send only to ALLOWED viewers
+        for viewer_id, connection in list(active_connections.items()):
+            # Check if viewer is allowed
+            if not viewer_manager.is_allowed(viewer_id):
+                continue  # Skip blocked viewers (WS stays open)
+            
             try:
                 if isinstance(send_message, dict) and "type" in send_message:
                     await asyncio.wait_for(
                         connection.send_json(send_message),
-                        timeout=0.1  # 100ms max wait
+                        timeout=0.1
                     )
                 else:
                     await asyncio.wait_for(
@@ -114,10 +132,10 @@ def broadcast(message: dict):
                         timeout=0.1
                     )
             except asyncio.TimeoutError:
-                # Client too slow, drop this frame for them
                 pass
             except Exception:
-                # Silently remove failed clients
-                active_connections.discard(connection)
+                active_connections.pop(viewer_id, None)
+                viewer_manager.unregister_viewer(viewer_id)
 
     asyncio.run_coroutine_threadsafe(_send(), _event_loop)
+

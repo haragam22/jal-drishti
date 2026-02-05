@@ -159,6 +159,21 @@ const useLiveStream = (enabled = true) => {
 
             ws.onopen = () => {
                 console.log('[WS] Connected to AI Backend');
+
+                // PHASE-3: Send viewer_id for multi-viewer streaming
+                // Generate or retrieve viewer_id from localStorage
+                let viewerId = localStorage.getItem('jalDrishtiViewerId');
+                if (!viewerId) {
+                    viewerId = 'viewer-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                    localStorage.setItem('jalDrishtiViewerId', viewerId);
+                }
+
+                // Send registration message
+                ws.send(JSON.stringify({
+                    viewer_id: viewerId,
+                    label: navigator.userAgent.includes('Mobile') ? 'Mobile Device' : 'Desktop Browser'
+                }));
+
                 setConnectionStatus(CONNECTION_STATES.CONNECTED);
                 setReconnectAttempt(0);
 
@@ -167,6 +182,7 @@ const useLiveStream = (enabled = true) => {
                     rafIdRef.current = requestAnimationFrame(renderLoop);
                 }
             };
+
 
             ws.onmessage = (event) => {
                 try {
