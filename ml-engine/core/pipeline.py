@@ -111,7 +111,8 @@ class JalDrishtiEngine:
 
     def infer(self, frame: np.ndarray):
         """
-        Executes the Dual-Stream Pipeline with GPU/FP16 optimization.
+        Executes the 7-Step Phase-2 Pipeline with GPU/FP16 optimization.
+        Executes the Dual-Stream Pipeline.
         Input: RGB numpy array (H, W, 3)
         Output: Strict JSON Schema + Annotated Frame (np.ndarray)
         """
@@ -170,19 +171,24 @@ class JalDrishtiEngine:
             # This runs 2x faster than calling predict() twice
             batch_images = [frame, enhanced_final]
             
+            # LOGIC PRESERVATION: Determine FP16 (Half-Precision) setting
+            # This ensures we keep the optimization from the code we just deleted
+            do_half = (self.use_fp16 and self.device.type == "cuda")
+            
             # Run Inference once
-            # Integrated Remote Optimization (FP16/Device) with Local Dual-Stream Logic
+            # We use conf=0.15 (Low) intentionally so our custom 'process_results' 
+            # function can handle the specific class thresholds (e.g. Drone=0.15)
             batch_results = self.yolo.predict(
                 batch_images, 
                 verbose=False, 
                 conf=0.15, 
                 device=self.device, 
-                half=(self.use_fp16 and self.device.type == "cuda")
+                half=do_half  # <--- Optimization Preserved Here
             )
             
             # Split results back
             results_raw = [batch_results[0]]      # Result for 'frame'
-            results_enhanced = [batch_results[1]] # Result for 'enhanced_final'
+            results_enhanced = [batch_results[1]] # Result for 'enhanced_final''
             
             # --- Step 7: Merge & Annotate ---
             detections = []
@@ -286,7 +292,7 @@ class JalDrishtiEngine:
             else:
                 state = STATE_SAFE_MODE
                 
-            # --- Output Contract ---
+            # --- Step 7: Output Contract ---
             latency_ms = (time.time() - start_time) * 1000
             response = {
                 "timestamp": datetime.datetime.now().isoformat(),
@@ -303,13 +309,6 @@ class JalDrishtiEngine:
             logger.error(f"[Core] Pipeline Error: {e}", exc_info=True)
             return self._build_safe_response(), frame
 
-    def _build_safe_response(self):
-        return {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "state": STATE_SAFE_MODE,
-            "max_confidence": 0.0,
-            "detections": []
-        }
 
     def clean_detections(self, detections, iou_threshold=0.4):
         """
