@@ -98,9 +98,7 @@ const AlertPanel = ({
                 </div>
                 <div className="header-status">
                     <span className="label">CURRENT STATUS:</span>
-                    <span className={`status-value status-${currentState.toLowerCase().replace('_', '-')}`}>
-                        {currentState.replace('_', ' ')}
-                    </span>
+                    <span className={`status-value status-${currentState.toLowerCase().replace('_', '-')}`}>{currentState.replace('_', ' ')}</span>
                 </div>
             </div>
 

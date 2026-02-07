@@ -245,8 +245,29 @@ const useLiveStream = (enabled = true) => {
                         frame_id: data.frame_id,
                         system: {
                             fps: data.system?.fps ?? null,
-                            latency_ms: data.system?.latency_ms ?? null
-                        }
+                            latency_ms: data.system?.latency_ms ?? null,
+                            ml_available: data.system?.ml_available ?? true
+                        },
+                        // MILESTONE-1: Sensor fusion data
+                        sensors: data.sensors || {
+                            sonar: { detected: false, distance_m: 0, confidence: 0 },
+                            ir: { detected: false, confidence: 0 },
+                            camera: { detected: false, confidence: 0, ml_available: true }
+                        },
+                        fusion_state: data.fusion_state || 'NORMAL',
+                        fusion_message: data.fusion_message || '',
+                        timeline_messages: data.timeline_messages || [],
+                        // MILESTONE-3: Risk score and contributions
+                        risk_score: data.risk_score ?? 0,
+                        sensor_contributions: data.sensor_contributions || {
+                            sonar: 0, ir: 0, camera: 0
+                        },
+                        // MILESTONE-4: Decision support data
+                        threat_priority: data.threat_priority || 'LOW',
+                        signature: data.signature || '',
+                        explainability: data.explainability || [],
+                        seen_before: data.seen_before || false,
+                        occurrence_count: data.occurrence_count || 0
                     };
 
                     // DECOUPLING: Store in ref, don't call setFrame directly
