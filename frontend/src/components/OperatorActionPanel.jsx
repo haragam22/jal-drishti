@@ -1,15 +1,13 @@
 import React, { useState, useCallback } from 'react';
-import { FUSION_STATE_COLORS } from '../constants';
 import '../App.css';
 
 /**
- * OperatorActionPanel Component (MILESTONE-4)
+ * OperatorActionPanel Component (MILESTONE-2 & 4)
  * 
- * Provides explicit operator action controls.
- * AI suggests, operator decides.
- * Every decision is logged.
+ * MILESTONE-4: Operator decision controls (Confirm/Dismiss/Unknown/Monitor)
+ * MILESTONE-2: Unknown object tagging for tactical override
  * 
- * Key Principle: A system with logged human decisions is deployable.
+ * Key Principle: AI suggests, operator decides. Every decision is logged.
  */
 
 const PRIORITY_COLORS = {
@@ -35,10 +33,15 @@ const OperatorActionPanel = ({
     occurrenceCount = 0,
     explainability = [],
     onDecision = () => { },
-    isActive = false  // Only show actions when there's an alert
+    trackId = null  // For tagging
 }) => {
     const [lastAction, setLastAction] = useState(null);
     const [actionTime, setActionTime] = useState(null);
+
+    // MILESTONE-2: Tagging state
+    const [showTagInput, setShowTagInput] = useState(false);
+    const [tagLabel, setTagLabel] = useState('');
+    const [isTagging, setIsTagging] = useState(false);
 
     const handleAction = useCallback((action) => {
         const decision = {
@@ -53,7 +56,46 @@ const OperatorActionPanel = ({
         setLastAction(action);
         setActionTime(new Date().toLocaleTimeString());
         onDecision(decision);
+
+        // If marking as unknown, show tagging input
+        if (action === 'MARK_UNKNOWN') {
+            setShowTagInput(true);
+        }
     }, [signature, riskScore, threatPriority, fusionState, onDecision]);
+
+    // MILESTONE-2: Handle tagging submission
+    const handleTagSubmit = useCallback(async () => {
+        if (!tagLabel.trim()) return;
+
+        setIsTagging(true);
+        try {
+            const response = await fetch('/api/operator/tag', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    track_id: trackId || 0,
+                    label: tagLabel.trim(),
+                    signature,
+                    confidence: riskScore
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                setLastAction(`TAGGED: ${tagLabel}`);
+                setActionTime(new Date().toLocaleTimeString());
+                setShowTagInput(false);
+                setTagLabel('');
+            } else {
+                console.error('[M2] Tag failed:', result);
+            }
+        } catch (err) {
+            console.error('[M2] Tag error:', err);
+        } finally {
+            setIsTagging(false);
+        }
+    }, [tagLabel, trackId, signature, riskScore]);
 
     const riskPercent = Math.round(riskScore * 100);
     const priorityColor = PRIORITY_COLORS[threatPriority] || PRIORITY_COLORS.LOW;
@@ -97,6 +139,34 @@ const OperatorActionPanel = ({
                 )}
             </div>
 
+            {/* MILESTONE-2: Tagging Input */}
+            {showTagInput && (
+                <div className="tagging-section">
+                    <div className="tagging-title">🏷️ Label this object</div>
+                    <div className="tagging-input-row">
+                        <input
+                            type="text"
+                            value={tagLabel}
+                            onChange={(e) => setTagLabel(e.target.value)}
+                            placeholder="e.g. Enemy Drone, Torpedo..."
+                            className="tag-input"
+                            onKeyDown={(e) => e.key === 'Enter' && handleTagSubmit()}
+                            disabled={isTagging}
+                        />
+                        <button
+                            className="tag-submit-btn"
+                            onClick={handleTagSubmit}
+                            disabled={!tagLabel.trim() || isTagging}
+                        >
+                            {isTagging ? '...' : '✓'}
+                        </button>
+                    </div>
+                    <div className="tagging-hint">
+                        Label saved for this mission. Data harvested for future training.
+                    </div>
+                </div>
+            )}
+
             {/* Action Buttons */}
             {showActions ? (
                 <div className="action-buttons">
@@ -116,7 +186,7 @@ const OperatorActionPanel = ({
                         className="action-btn unknown"
                         onClick={() => handleAction('MARK_UNKNOWN')}
                     >
-                        🏷️ Unknown
+                        🏷️ Tag Object
                     </button>
                     <button
                         className="action-btn monitor"
@@ -152,3 +222,4 @@ const OperatorActionPanel = ({
 };
 
 export default OperatorActionPanel;
+

@@ -3165,6 +3165,74 @@ body {
   font-style: italic;
 }
 
+/* MILESTONE-2: Tagging Section */
+.tagging-section {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.tagging-title {
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: #3B82F6;
+  margin-bottom: 8px;
+}
+
+.tagging-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.tag-input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 0.6rem;
+  outline: none;
+}
+
+.tag-input:focus {
+  border-color: #3B82F6;
+}
+
+.tag-input::placeholder {
+  color: var(--text-muted);
+}
+
+.tag-submit-btn {
+  padding: 8px 12px;
+  background: rgba(34, 197, 94, 0.2);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  border-radius: 4px;
+  color: #22C55E;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tag-submit-btn:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.3);
+}
+
+.tag-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tagging-hint {
+  font-size: 0.45rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-style: italic;
+}
+
 /* ================================================
    CENTER DASHBOARD OVERLAY & RISK CIRCLE (Phase 4)
    ================================================ */
