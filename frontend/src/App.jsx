@@ -13,9 +13,10 @@ import MetricsPanel from './components/MetricsPanel';
 import SnapshotModal from './components/SnapshotModal';
 import LastAlertSnapshot from './components/LastAlertSnapshot';
 import InputSourceToggle from './components/InputSourceToggle';
+import ConnectedViewers from './components/ConnectedViewers';
 import useLiveStream from './hooks/useLiveStream';
 import useFakeStream from './hooks/useFakeStream';
-import { SYSTEM_STATES, CONNECTION_STATES, INPUT_SOURCES, EVENT_TYPES } from './constants';
+import { SYSTEM_STATES, CONNECTION_STATES, INPUT_SOURCES, EVENT_TYPES, SOURCE_STATES } from './constants';
 import './App.css';
 
 /**
@@ -59,7 +60,9 @@ const formatUptime = (ms) => {
  * IMPORTANT: Backend is unchanged. All enhancements are frontend-only.
  */
 function App() {
-  const [inputSource, setInputSource] = useState(INPUT_SOURCES.DUMMY_VIDEO);
+  const [inputSource, setInputSource] = useState('video');
+  // Phase-3: Track backend source state
+  const [sourceState, setSourceState] = useState(SOURCE_STATES.IDLE);
 
   // Maximize panel state: null, 'raw', or 'enhanced'
   const [maximizedPanel, setMaximizedPanel] = useState(null);
@@ -295,9 +298,20 @@ function App() {
 
           {/* Phase-3: Input Source Toggle (Fills empty space) */}
           <InputSourceToggle
-            currentSource={inputSource === 'camera' ? 'camera' : 'video'}
-            onToggle={handleSourceToggle}
+            currentSource={inputSource}
+            sourceState={sourceState}
+            onToggle={(source, state) => {
+              setInputSource(source);
+              if (state) setSourceState(state);
+            }}
+            onReset={() => {
+              // Reset frame counters on source switch
+              console.log('[App] Source switched - counters reset');
+            }}
           />
+
+          {/* Phase-3: Connected Viewers Panel (Operator only) */}
+          <ConnectedViewers isOperator={true} />
         </div>
 
         {/* Real-time RAW Feed - Click to maximize */}

@@ -5,11 +5,23 @@
  * DO NOT use thresholds to infer state - state comes ONLY from backend ML.
  */
 
+// API Configuration
+export const API_BASE_URL = 'http://127.0.0.1:9000';
+
 // System states - directly from backend ML
 export const SYSTEM_STATES = {
   CONFIRMED_THREAT: 'CONFIRMED_THREAT',
   POTENTIAL_ANOMALY: 'POTENTIAL_ANOMALY',
   SAFE_MODE: 'SAFE_MODE'
+};
+
+// Source states - from SourceManager
+export const SOURCE_STATES = {
+  IDLE: 'IDLE',
+  VIDEO_ACTIVE: 'VIDEO_ACTIVE',
+  CAMERA_WAITING: 'CAMERA_WAITING',
+  CAMERA_ACTIVE: 'CAMERA_ACTIVE',
+  ERROR: 'ERROR'
 };
 
 // State-to-color mapping (Matte Black Theme)
@@ -48,7 +60,8 @@ export const EVENT_TYPES = {
   SAFE_MODE_EXIT: 'safe_mode_exit',
   CONNECTION: 'connection',
   DISCONNECTION: 'disconnection',
-  STATE_CHANGE: 'state_change'
+  STATE_CHANGE: 'state_change',
+  SOURCE_SWITCH: 'source_switch'
 };
 
 // Event icons for timeline
@@ -58,7 +71,8 @@ export const EVENT_ICONS = {
   safe_mode_exit: '✅',
   connection: '🔗',
   disconnection: '🔌',
-  state_change: '📊'
+  state_change: '📊',
+  source_switch: '🔄'
 };
 
 // Matte Black Theme Colors
@@ -86,8 +100,6 @@ export const THEME_COLORS = {
 };
 
 // Reconnection config
-// After MAX_ATTEMPTS, system enters FAILED state.
-// Operator must intervene (manual refresh / backend check).
 export const RECONNECT_CONFIG = {
   MAX_ATTEMPTS: 10,
   BASE_DELAY_MS: 1000,
@@ -96,14 +108,15 @@ export const RECONNECT_CONFIG = {
 
 // Overlay opacity levels
 export const OVERLAY_OPACITY = {
-  RECONNECTING: 0.5,   // 50% - temporary
-  FAILED: 0.7          // 70% - hard failure
+  RECONNECTING: 0.5,
+  FAILED: 0.7
 };
 
 // WebSocket config
 export const WS_CONFIG = {
   URL: 'ws://127.0.0.1:9000/ws/stream',
-  FRAME_INTERVAL_MS: 66  // ~15 FPS
+  RAW_URL: 'ws://127.0.0.1:9000/ws/raw_feed',
+  FRAME_INTERVAL_MS: 66
 };
 
 // Input source types
@@ -112,3 +125,4 @@ export const INPUT_SOURCES = {
   LIVE_CAMERA: 'Live Camera',
   PHONE_CAMERA: 'Phone Camera'
 };
+

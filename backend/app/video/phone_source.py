@@ -24,6 +24,8 @@ class PhoneCameraSource:
     Implements the same interface as RawVideoSource:
     - read() generator yielding (frame, frame_id, timestamp) tuples
     
+    PHASE-3 FIX: FPS throttling to prevent queue overflow.
+    
     Usage:
         # Create global instance
         phone_camera_source = PhoneCameraSource()
@@ -36,6 +38,10 @@ class PhoneCameraSource:
             ...
     """
     
+    # FPS throttling settings
+    TARGET_CAMERA_FPS = 12
+    MIN_FRAME_INTERVAL = 1.0 / TARGET_CAMERA_FPS
+    
     def __init__(self, timeout: float = 5.0):
         """
         Initialize the PhoneCameraSource.
@@ -46,30 +52,51 @@ class PhoneCameraSource:
                             can be used to check for graceful shutdown.
         """
         # Thread-safe queue for frames from WebSocket
-        # PHASE-3 CORE: maxsize=2 for strict backpressure
-        # Only keep latest 2 frames, drop older immediately
-        self.frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=2)
+        # PHASE-3 FIX: maxsize=30 to handle camera bursts
+        self.frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=30)
         
         self.timeout = timeout
         self.running = False
         self.connected = False
         self._frame_id = 0
         
-        print("[PhoneCameraSource] Initialized. Waiting for phone connection...")
+        # FPS throttling state
+        self._last_inject_time = 0.0
+        self._frames_received = 0
+        self._frames_dropped_throttle = 0
+        
+        print("[PhoneCameraSource] Initialized with FPS throttle = 12")
     
     def inject_frame(self, frame: np.ndarray) -> bool:
         """
         Called by the WebSocket upload handler to push a new frame.
         
+        PHASE-3 FIX: FPS throttling to prevent queue overflow.
+        
         Args:
             frame (np.ndarray): RGB frame with shape (H, W, 3) and dtype uint8
             
         Returns:
-            bool: True if frame was accepted, False if queue is full (frame dropped)
+            bool: True if frame was accepted, False if throttled or queue full
         """
         if frame is None:
             return False
-            
+        
+        self._frames_received += 1
+        
+        # FPS throttling - drop frames that arrive too fast
+        now = time.time()
+        time_since_last = now - self._last_inject_time
+        
+        if time_since_last < self.MIN_FRAME_INTERVAL:
+            self._frames_dropped_throttle += 1
+            # Log every 100 throttled frames
+            if self._frames_dropped_throttle % 100 == 0:
+                print(f"[PhoneCameraSource] Throttled {self._frames_dropped_throttle} frames (target: {self.TARGET_CAMERA_FPS} FPS)")
+            return False
+        
+        self._last_inject_time = now
+        
         try:
             # Non-blocking put with timeout to prevent deadlock
             self.frame_queue.put(frame, block=False)
@@ -78,12 +105,20 @@ class PhoneCameraSource:
                 self.connected = True
                 print("[PhoneCameraSource] Phone connected! Receiving frames.")
             
+            # CRITICAL: Notify source_manager that we received a frame
+            # This enables frame-driven timeout (not wall-clock)
+            try:
+                from app.services.source_manager import source_manager
+                source_manager.on_frame_received()
+            except Exception:
+                pass  # Don't fail frame injection on source_manager error
+            
             return True
             
         except queue.Full:
             # Queue full - scheduler is behind, drop this frame
-            # This is similar to how FrameScheduler drops frames when behind
-            print("[PhoneCameraSource] Queue full, dropping frame (scheduler behind)")
+            if self._frames_received % 50 == 0:
+                print("[PhoneCameraSource] Queue full, dropping frame (scheduler behind)")
             return False
     
     def stop(self):

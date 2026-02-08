@@ -4,15 +4,12 @@ os.environ["NO_PROXY"] = "localhost,127.0.0.1,0.0.0.0"
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import stream, ws_server, phone_upload
+from app.api import stream, ws_server, phone_upload, source_api, viewer_api
 from app.auth import auth_router
 
 # Core Modules
-from app.video.video_reader import RawVideoSource
-from app.video.phone_source import PhoneCameraSource, phone_camera_source
-from app.scheduler.frame_scheduler import FrameScheduler
-from app.ml.dummy_ml import DummyML
 from app.services.video_stream_manager import video_stream_manager
+from app.services.source_manager import source_manager
 from app.config_loader import config
 
 import threading
@@ -28,21 +25,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Jal-Drishti Backend", version="1.0.0")
-
-# Global references for graceful shutdown
-_scheduler_thread = None
-_shutdown_event = threading.Event()
-
-# Global references for graceful shutdown
-_scheduler_thread = None
-_shutdown_event = threading.Event()
+app = FastAPI(title="Jal-Drishti Backend", version="2.0.0")
 
 # Mount static files directory for phone_camera.html
-# Access at: http://<host>:<port>/static/phone_camera.html
-# __file__ is backend/app/main.py, so we go up twice to get backend/
-_app_dir = os.path.dirname(os.path.abspath(__file__))  # backend/app
-_backend_dir = os.path.dirname(_app_dir)               # backend
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+_backend_dir = os.path.dirname(_app_dir)
 static_dir = os.path.join(_backend_dir, "static")
 print(f"[Main] Static directory: {static_dir}, exists: {os.path.exists(static_dir)}")
 if os.path.exists(static_dir):
@@ -61,6 +48,8 @@ app.add_middleware(
 # Include routers
 app.include_router(ws_server.router, prefix="/ws", tags=["websocket"])
 app.include_router(phone_upload.router, prefix="/ws", tags=["phone"])
+app.include_router(source_api.router, tags=["source"])
+app.include_router(viewer_api.router, tags=["viewers"])
 
 # --- RAW FEED WEBSOCKET ---
 @app.websocket("/ws/raw_feed")
@@ -68,197 +57,139 @@ async def raw_feed_endpoint(websocket: WebSocket):
     await video_stream_manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive, listen for any client messages (ignore them or handle control)
             data = await websocket.receive_text()
-            # Optional: Heartbeat or keepalive logic
     except WebSocketDisconnect:
         video_stream_manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"[WS] Error in raw_feed: {e}")
         video_stream_manager.disconnect(websocket)
 
+
 @app.on_event("startup")
 async def startup_event():
+    """
+    PHASE-3 CORE: Start in IDLE mode.
+    
+    No source is attached at startup. User selects source via API.
+    ML engine is warmed up and ready.
+    """
     # Load configuration
     config.print_summary()
     if not config.validate():
         logger.warning("[Startup] Configuration has validation errors")
     
-    # Capture the main event loop for the WS server to use
+    # Capture the main event loop
     loop = asyncio.get_running_loop()
     ws_server.set_event_loop(loop)
-    import os
-    # Initialize Core Pipeline
-    from app.services.ml_service import MLService
     
+    # Initialize ML Service
+    from app.services.ml_service import MLService
     debug_mode = config.get("ml_service.debug_mode", True)
     ml_service = MLService(debug_mode=debug_mode)
-    # Expose the single MLService instance via the FastAPI app state so
-    # other routers (e.g. stream) can access it without importing a global.
     app.state.ml_service = ml_service
-    # Probe / warm ML-engine: try health and optionally do a quick warm inference if available
-    def _probe_and_warm():
+    
+    # Warm up ML engine in background
+    def _warmup_ml():
         try:
             info = ml_service.probe()
             if info and info.get('device'):
-                logger.info(f"[Startup] ML engine reported device: {info.get('device')}")
-            # If ML-engine is up, do one small warmup (non-blocking) to ensure models are resident
-            try:
-                import numpy as _np
-                black = _np.zeros((480, 600, 3), dtype=_np.uint8)
-                ml_service.run_inference(black)
-                logger.info("[Startup] ML engine warmup inference completed")
-            except Exception:
-                logger.debug("[Startup] ML warmup inference failed or ML-engine not ready yet")
-        except Exception:
-            logger.debug("[Startup] ML probe failed; ML-engine likely unavailable at startup")
-
-    warm_thread = threading.Thread(target=_probe_and_warm, daemon=True)
-    warm_thread.start()
-    # Wait up to 7s for ML-engine to respond to health/warmup
-    warm_start = time.time()
-    while time.time() - warm_start < 7.0:
-        if getattr(ml_service, 'device_cached', None) is not None:
-            logger.info("[Startup] ML probe detected device: %s", ml_service.device_cached)
-            break
-        time.sleep(0.1)
-    # Warmup: initialize engine in background and wait up to 7 seconds
-    # so the first real frames sent to ML don't incur long init delay.
-    def _warmup_engine():
-        try:
-            ml_service._ensure_engine()
-        except Exception:
-            # _ensure_engine handles its own logging; we silence here
-            pass
-
-    warmup_thread = threading.Thread(target=_warmup_engine, daemon=True)
-    warmup_thread.start()
-    warmup_start = time.time()
-    warmup_timeout = 7.0  # seconds
-    logger.info(f"[Startup] Warming ML engine (waiting up to {warmup_timeout}s)...")
-    while time.time() - warmup_start < warmup_timeout:
-        if getattr(ml_service, 'engine', None) is not None:
-            logger.info("[Startup] ML engine initialized during warmup")
-            break
-        time.sleep(0.1)
-    else:
-        logger.info("[Startup] ML warmup timed out after 7s; continuing startup (engine will finish lazy init)")
-    # SOURCE SELECTION LOGIC
-    # =====================================================
-    # INPUT_SOURCE env var controls which video source to use:
-    # - "video" (default): Use dummy.mp4 file (existing behavior)
-    # - "phone": Use phone camera via WebSocket upload
-    # =====================================================
-    input_source = os.getenv("INPUT_SOURCE", "video").lower()
+                logger.info(f"[Startup] ML engine device: {info.get('device')}")
+            # Warmup inference
+            import numpy as np
+            black = np.zeros((480, 640, 3), dtype=np.uint8)
+            ml_service.run_inference(black)
+            logger.info("[Startup] ML engine warmup completed")
+        except Exception as e:
+            logger.debug(f"[Startup] ML warmup skipped: {e}")
     
-    if input_source == "phone":
-        # Use phone camera source
-        # Frames are injected via /ws/upload endpoint from phone_camera.html
-        reader = phone_camera_source
-        print("[Startup] Using PHONE CAMERA source. Connect phone to /ws/upload")
-    else:
-        video_path = config.get("video.file_path", "backend/dummy.mp4")
-        if not os.path.exists(video_path):
-            # Check relative to root as well
-            if os.path.exists("dummy.mp4"):
-                video_path = "dummy.mp4"
-            else:
-                print(f"[Startup] Warning: {video_path} not found.")
-                return
-        
-        reader = RawVideoSource(video_path)
-
-    # Callback to push to WebSocket
+    warmup_thread = threading.Thread(target=_warmup_ml, daemon=True)
+    warmup_thread.start()
+    
+    # Wait up to 7s for ML warmup
+    warmup_start = time.time()
+    while time.time() - warmup_start < 7.0:
+        if getattr(ml_service, 'engine', None) is not None:
+            logger.info("[Startup] ML engine ready")
+            break
+        time.sleep(0.1)
+    
+    # Configure SourceManager with callbacks
     def on_result(envelope):
-        """
-        Flatten the payload for the frontend.
-        The frontend expects 'state', 'image_data', etc. at the top level.
-        """
+        """Broadcast enhanced frames to WS clients."""
         if envelope.get("type") == "data" and "payload" in envelope:
-            flat_payload = {
-                "type": "data",
-                **envelope["payload"]
-            }
+            flat_payload = {"type": "data", **envelope["payload"]}
             ws_server.broadcast(flat_payload)
         else:
             ws_server.broadcast(envelope)
-
-    # Scheduler
-    # Raw frame callback: schedule the coroutine on the main loop
+    
     def raw_frame_callback(frame, frame_id, timestamp):
+        """Broadcast raw frames."""
         try:
-            # Skip if shutting down
             if video_stream_manager.is_shutting_down:
                 return
-            # Use run_coroutine_threadsafe to schedule async broadcast from scheduler thread
             asyncio.run_coroutine_threadsafe(
                 video_stream_manager.broadcast_raw_frame(frame, frame_id, timestamp),
                 loop
             )
-        except RuntimeError as e:
-            # Event loop is closed or being closed; silently ignore during shutdown
-            if "closed" in str(e) or "is not running" in str(e):
-                pass
-            else:
-                logger.error(f"[Startup] Error scheduling raw frame broadcast: {e}")
         except Exception as e:
-            # Silently ignore exceptions during shutdown
             if not video_stream_manager.is_shutting_down:
-                logger.error(f"[Startup] Error scheduling raw frame broadcast: {e}")
-
-    target_fps = config.get("performance.target_fps", 12)
-    scheduler = FrameScheduler(reader, target_fps=target_fps, ml_module=ml_service, result_callback=on_result, raw_callback=raw_frame_callback, shutdown_event=_shutdown_event)
+                logger.error(f"[Raw] Broadcast error: {e}")
     
-    # Run in background thread and store reference for shutdown
-    global _scheduler_thread
-    # Make the scheduler thread a daemon so it doesn't block process exit
-    _scheduler_thread = threading.Thread(target=scheduler.run, daemon=True)
-    _scheduler_thread.start()
-    # Keep a reference to the scheduler for shutdown hooks
-    app.state.scheduler = scheduler
-    logger.info("[Startup] Scheduler thread started (ML engine will initialize lazily).")
+    video_path = config.get("video.file_path", "backend/dummy.mp4")
+    target_fps = config.get("performance.target_fps", 12)
+    
+    source_manager.configure(
+        ml_service=ml_service,
+        on_result_callback=on_result,
+        on_raw_callback=raw_frame_callback,
+        event_loop=loop,
+        video_path=video_path,
+        target_fps=target_fps
+    )
+    
+    # Store reference
+    app.state.source_manager = source_manager
+    
+    logger.info("=" * 50)
+    logger.info("[Startup] PHASE-3 CORE: Backend started in IDLE mode")
+    logger.info("[Startup] Use /api/source/select to start streaming")
+    logger.info("=" * 50)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Gracefully shut down the scheduler thread to avoid asyncio errors on exit.
-    """
-    global _scheduler_thread, _shutdown_event
-    
-    # Signal the video stream manager to stop sending frames
+    """Graceful shutdown."""
     video_stream_manager.is_shutting_down = True
     
-    # Try to stop the video source if available (so read() can exit quickly)
-    try:
-        sched = getattr(app.state, 'scheduler', None)
-        if sched and getattr(sched, 'video_source', None):
-            try:
-                sched.video_source.stop()
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # Signal the scheduler to stop immediately
-    _shutdown_event.set()
-    logger.info("[Shutdown] Signaled scheduler thread to stop.")
+    # Shutdown SourceManager
+    if hasattr(app.state, 'source_manager'):
+        app.state.source_manager.shutdown()
     
-    if _scheduler_thread and _scheduler_thread.is_alive():
-        logger.info("[Shutdown] Waiting for scheduler thread to finish...")
-        # Give the thread a chance to finish (e.g., end of video loop)
-        _scheduler_thread.join(timeout=5.0)
-        if _scheduler_thread.is_alive():
-            logger.warning("[Shutdown] Scheduler thread did not stop gracefully (timeout). Continuing shutdown.")
-        else:
-            logger.info("[Shutdown] Scheduler thread stopped cleanly.")
-
+    logger.info("[Shutdown] Backend shutdown complete")
 
 
 @app.get("/")
 def read_root():
-    return {"message": "Jal-Drishti Backend is running"}
+    return {
+        "message": "Jal-Drishti Backend is running",
+        "version": "2.0.0",
+        "mode": "IDLE - Use /api/source/select to start streaming"
+    }
 
-# Entry point for debugging if run directly
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    status = source_manager.get_status()
+    return {
+        "status": "healthy",
+        "source_state": status["state"],
+        "source_type": status["source"]
+    }
+
+
+# Entry point for debugging
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=9000, reload=True)
+

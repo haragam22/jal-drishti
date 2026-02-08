@@ -1,15 +1,15 @@
 
-# Jal-Drishti (Water-Vision) 🌊👁️
+# Jal-Drishti 
 
 **Advanced Real-Time AI Surveillance Dashboard for Defense**
 
-## 🚀 Overview
+##  Overview
 
 **Jal-Drishti** is a cutting-edge real-time surveillance system designed for underwater and high-stakes defense environments. It combines state-of-the-art computer vision models with a robust, low-latency dashboard to provide actionable intelligence.
 
 The system features a **Dual-Mode Architecture** separating the core application logic (Backend) from the heavy AI computation (ML Engine), ensuring stability and responsiveness even under heavy load.
 
-## ✨ Key Features
+## Key Features
 
 - **🔴 Safe Mode Monitoring**: Real-time threat assessment with visual "Safe Mode" / "Threat" indicators.
 - **📷 Information Enhancement**: Uses **FUnIE-GAN** to clear up underwater/low-visibility footage in real-time.
