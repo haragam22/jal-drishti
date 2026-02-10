@@ -16,18 +16,30 @@ class EngineWrapper:
     def __init__(self):
         self.engine = None
         self.device = "cpu"
+        self.device_name = None
+        self.memory_gb = None
         self.fp16 = False
 
     def initialize(self):
         try:
             from core.pipeline import JalDrishtiEngine
             self.engine = JalDrishtiEngine()
-            # Try to read device info from engine if available
-            dev = getattr(self.engine, 'device', None)
-            if dev is not None:
-                self.device = str(dev)
-            # FP16 detection best-effort
-            self.fp16 = getattr(self.engine, 'use_fp16', False) or ('cuda' in self.device and hasattr(self.engine, 'use_fp16'))
+            
+            # Read device info from engine's DeviceManager
+            if hasattr(self.engine, 'device_info'):
+                self.device = self.engine.device_info.device_type
+                self.device_name = self.engine.device_info.device_name
+                self.fp16 = self.engine.use_fp16
+                self.memory_gb = self.engine.device_info.memory_gb
+            else:
+                # Fallback for backwards compatibility
+                dev = getattr(self.engine, 'device', None)
+                if dev is not None:
+                    self.device = str(dev)
+                self.fp16 = getattr(self.engine, 'use_fp16', False)
+                self.device_name = None
+                self.memory_gb = None
+            
             logger.info(f"[ML Engine] Initialized on device={self.device}, fp16={self.fp16}")
         except Exception as e:
             logger.exception("[ML Engine] Failed to initialize engine: %s", e)
@@ -46,25 +58,41 @@ engine_wrapper = EngineWrapper()
 @app.on_event("startup")
 def startup_event():
     """
-    ML-Engine Startup Sequence:
-    1. Detect CUDA availability
-    2. Log device details (GPU name, memory)
+    ML-Engine Startup Sequence (Cross-Vendor Compatible):
+    1. Detect available compute backends (CUDA, MPS, XPU, CPU)
+    2. Log device details
     3. Initialize engine with models
     """
     import torch
     
     logger.info("[ML Engine] Starting up...")
+    logger.info("[ML Engine] Cross-Vendor GPU Compatibility Layer Active")
     
-    # GPU Detection and Logging
+    # Check all available backends
+    backends = []
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        logger.info(f"[ML Engine] GPU Detected: {gpu_name}")
+        logger.info(f"[ML Engine] CUDA GPU Detected: {gpu_name}")
         logger.info(f"[ML Engine] GPU Memory: {gpu_memory_gb:.2f} GB")
-        logger.info("[ML Engine] CUDA acceleration enabled")
-    else:
-        logger.warning("[ML Engine] CUDA not available, using CPU fallback")
+        backends.append("cuda")
+    
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        logger.info("[ML Engine] Apple MPS Backend Detected")
+        backends.append("mps")
+    
+    try:
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            logger.info("[ML Engine] Intel XPU Backend Detected")
+            backends.append("xpu")
+    except AttributeError:
+        pass
+    
+    if not backends:
+        logger.warning("[ML Engine] No GPU backends available, using CPU fallback")
         logger.warning("[ML Engine] Performance will be significantly reduced")
+    else:
+        logger.info(f"[ML Engine] Available backends: {', '.join(backends)}")
     
     # Initialize Engine (loads FUnIE-GAN + YOLO)
     logger.info("[ML Engine] Loading models...")
@@ -74,21 +102,32 @@ def startup_event():
 @app.get("/health")
 def health():
     """
-    Health check endpoint with GPU status.
+    Health check endpoint with cross-vendor GPU status.
     Used by backend to verify ML-engine availability.
     """
     import torch
     
-    cuda_available = torch.cuda.is_available()
+    # Determine available backends for compatibility info
+    backends_available = []
+    if torch.cuda.is_available():
+        backends_available.append("cuda")
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        backends_available.append("mps")
+    try:
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            backends_available.append("xpu")
+    except AttributeError:
+        pass
+    backends_available.append("cpu")  # CPU always available
     
     return {
         "status": "ok",
         "device": engine_wrapper.device,
+        "device_name": engine_wrapper.device_name,
         "fp16": engine_wrapper.fp16,
+        "memory_gb": engine_wrapper.memory_gb,
         "loaded": engine_wrapper.engine is not None,
-        "cuda_available": cuda_available,
-        "gpu_name": torch.cuda.get_device_name(0) if cuda_available else None,
-        "gpu_memory_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2) if cuda_available else None,
+        "backends_available": backends_available,
     }
 
 
