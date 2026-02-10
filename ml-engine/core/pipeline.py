@@ -19,6 +19,7 @@ from .config import (
     CONFIDENCE_THRESHOLD, HIGH_CONFIDENCE_THRESHOLD,
     STATE_CONFIRMED_THREAT, STATE_POTENTIAL_ANOMALY, STATE_SAFE_MODE
 )
+from .device_manager import DeviceManager, DeviceInfo
 
 # MILESTONE-2: Tactical Override System
 # These imports may fail if backend not in path - fallback gracefully
@@ -42,21 +43,48 @@ if M2_AVAILABLE:
 class JalDrishtiEngine:
     def __init__(self, use_gpu=True, use_fp16=True):
         """
-        Initialize the ML Pipeline with GPU/FP16 support.
+        Initialize the ML Pipeline with Cross-Vendor GPU Compatibility.
+        
+        Uses DeviceManager for automatic device detection and selection.
+        FP16 is enabled only on devices that fully support it (CUDA).
         
         Args:
             use_gpu (bool): Enable GPU if available (with CPU fallback)
-            use_fp16 (bool): Enable FP16 half-precision inference
+            use_fp16 (bool): Request FP16 half-precision inference (conditional)
         """
-        self.use_fp16 = use_fp16
-        self.device = self._init_device(use_gpu)
-        self.scaler = torch.cuda.amp.GradScaler() if self.device.type == "cuda" else None
+        # =========================================================
+        # CROSS-VENDOR GPU COMPATIBILITY (Step 1 & 2)
+        # Use centralized DeviceManager for device selection
+        # =========================================================
+        self.device_manager = DeviceManager(force_cpu=not use_gpu)
+        self.device_info: DeviceInfo = self.device_manager.get_device_info()
+        self.device = self.device_info.device
         
-        logger.info(f"[Core] Using device: {self.device}")
-        if self.device.type == "cuda":
-            logger.info(f"[Core] GPU Name: {torch.cuda.get_device_name(0)}")
-            logger.info(f"[Core] GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-            logger.info(f"[Core] FP16 Enabled: {self.use_fp16}")
+        # =========================================================
+        # STEP 3: Make Mixed Precision (FP16) Conditional
+        # Enable FP16 ONLY where it is guaranteed to be safe
+        # =========================================================
+        # FP16 is only enabled if:
+        # 1. User requested FP16 (use_fp16=True)
+        # 2. Device fully supports FP16 (only CUDA currently)
+        self.use_fp16 = use_fp16 and self.device_info.fp16_supported
+        
+        # Log decision rationale for transparency
+        if use_fp16 and not self.device_info.fp16_supported:
+            logger.info(f"[Core] FP16 requested but not safe on {self.device_info.device_type}. Using FP32.")
+        
+        # Scaler only needed for CUDA FP16
+        self.scaler = torch.cuda.amp.GradScaler() if (self.device.type == "cuda" and self.use_fp16) else None
+        
+        # =========================================================
+        # STEP 6: Logging & Transparency
+        # Explicit runtime logging for reviewers and teammates
+        # =========================================================
+        logger.info(f"[Core] Using device: {self.device} ({self.device_info.device_name})")
+        logger.info(f"[Core] Device type: {self.device_info.device_type.upper()}")
+        logger.info(f"[Core] FP16 Mode: {'Enabled' if self.use_fp16 else 'Disabled (FP32)'}")
+        if self.device_info.memory_gb:
+            logger.info(f"[Core] GPU Memory: {self.device_info.memory_gb:.2f} GB")
         
         # 1. Load FUnIE-GAN
         self.gan = FunieGANGenerator().to(self.device)
@@ -113,24 +141,6 @@ class JalDrishtiEngine:
         # Warmup
         logger.info("[Core] Engine ready.")
         logger.info(f"[Core] Anomaly persistence threshold: {self.ANOMALY_PERSISTENCE_THRESHOLD} frames")
-    
-    def _init_device(self, use_gpu=True):
-        """
-        Initialize and detect device with fallback to CPU.
-        
-        Returns:
-            torch.device: Selected device (cuda or cpu)
-        """
-        if use_gpu and torch.cuda.is_available():
-            device = torch.device("cuda")
-            logger.info("[Core] GPU (CUDA) detected and enabled")
-            return device
-        elif use_gpu:
-            logger.warning("[Core] GPU requested but CUDA not available. Falling back to CPU.")
-            return torch.device("cpu")
-        else:
-            logger.info("[Core] CPU mode selected")
-            return torch.device("cpu")
 
     def validate_frame(self, frame):
         """Step 1: Frame Validity Gate"""
